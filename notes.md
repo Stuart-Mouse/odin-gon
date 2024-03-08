@@ -30,6 +30,19 @@ create a window for generally browsing all of the major static data structures i
 ### Parsing
 
 implement callbacks
+    create some helpful utility callbacks and provide them with the library
+        setting a separate array count variable when writing to a static array or slice (needs to also prevent data binding to this field)
+        
+parsing/serializing arrays where index matters (e.g. lookup tables)
+    can serialize the array as a gon object and use the gon object name of each element as the index
+```
+lookup {
+    1 { ... }
+    2 { ... }
+    3 { ... }
+}
+```
+
 
 struct intialization
     always zero memory
@@ -37,9 +50,23 @@ struct intialization
     callback to set value instead
         setup map[type] (proc(^type) -> bool) to init certain types automagically?
 
+allocations for pointers and slices
+    want to have the option to specify an allocator for data bindings.
+    the way this allocator is used may differ depending on the data type
+    for strings, we just pass the allocator to strings.clone
+    for slices, we just pass the allocator to alloc/realloc
+    for pointers, we may want to either allocate the object individually, or we can pass a secondary data binding
+        this secondary binding will be the actual backing storage location for the object we are pointing to
+        if this backing location is a slice, we may use the provided allocator to alloc/realloc as we would for a normal slice data binding
+
+
 ### Serialization
 
 *not yet implemented*
+
+serialize to a nested path
+    this will require totally rewriting the serialization procedure to be more non-linear
+    but it seems like a worthwhile addition, since it will grant a lot more flexibility to change how a file is serialized/parsed without requiring some kind of callback weirdness.
 
 Serialize []u8 and [dynamic]u8 types as strings 
     Should it be opt-in or opt-out?

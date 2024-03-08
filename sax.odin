@@ -16,19 +16,28 @@ SAX_Field :: struct {
     data_binding : any,
     parent       : ^SAX_Field,
     array_index  : int,
+    // flags        : SAX_Field_Flags,
 }
 
-SAX_Data_Binding :: struct {
-    binding    : any,
-    field_path : []string,
-    path_depth : int,
+// SAX_Field_Flags :: bit_set[SAX_Field_Flag]
+// SAX_Field_Flag :: enum {
+
+// }   
+
+Data_Binding :: struct {
+    binding     : any,
+    field_path  : string,
+
+    _field_path : []string,
+    _path_depth : int,
 }
 
 SAX_Parse_Context :: struct {
     file          : string,
-    data_bindings : []SAX_Data_Binding,
+    data_bindings : []Data_Binding,
     event_handler : SAX_Event_Handler,
-    field_depth   : int,
+
+    _field_depth  : int,
 }
 
 SAX_Return_Code :: enum {
@@ -47,7 +56,10 @@ SAX_Event_Handler :: struct {
     : proc(^SAX_Parse_Context, ^SAX_Field) -> SAX_Return_Code
 }
 
-SAX_parse_file :: proc(parse_context: ^SAX_Parse_Context) -> bool {
+SAX_parse_file :: proc(using parse_context: ^SAX_Parse_Context) -> bool {
+    for &b in data_bindings {
+        b._field_path = strings.split(b.field_path, "/", allocator = context.temp_allocator)
+    }
     return SAX_parse_object(parse_context, nil)    
 }
 
@@ -113,20 +125,20 @@ SAX_parse_object :: proc(using parse_context: ^SAX_Parse_Context, parent: ^SAX_F
         for &b in data_bindings {
             // check that field address matched up to this point
             // also skip completed matches
-            if b.path_depth < field_depth || 
-               len(b.field_path) <= field_depth {
+            if b._path_depth < _field_depth || 
+               len(b._field_path) <= _field_depth {
                 continue
             }
 
-            // check if field_path[field_depth] is a match
-            if field.name != b.field_path[field_depth] {
+            // check if _field_path[_field_depth] is a match
+            if field.name != b._field_path[_field_depth] {
                 continue
             }
-            b.path_depth += 1;
+            b._path_depth += 1;
 
             // check if we've matched the entire field address
-            if len(b.field_path) == b.path_depth {
-                b.path_depth = -1; // deactivate the binding so that it will be skipped in future checks
+            if len(b._field_path) == b._path_depth {
+                b._path_depth = -1; // deactivate the binding so that it will be skipped in future checks
 
                 if !set_field_data_binding(parse_context, &field, b.binding) {
                     return false
@@ -206,12 +218,12 @@ SAX_parse_object :: proc(using parse_context: ^SAX_Parse_Context, parent: ^SAX_F
 
         // recurse for object / array
         if field.type == .OBJECT || field.type == .ARRAY {
-            field_depth += 1
+            _field_depth += 1
             SAX_parse_object(parse_context, &field) or_return
-            field_depth -= 1
+            _field_depth -= 1
             for &b in data_bindings {
-                if b.path_depth > field_depth {
-                    b.path_depth -= 1
+                if b._path_depth > _field_depth {
+                    b._path_depth -= 1
                 }
             }
         }
@@ -231,6 +243,21 @@ set_field_data_binding :: proc(using parse_context: ^SAX_Parse_Context, field: ^
             case runtime.Type_Info_String:
             case runtime.Type_Info_Bit_Set:
             case runtime.Type_Info_Boolean:
+            case runtime.Type_Info_Array:
+                if tiv.elem.size != 1 {
+                    fmt.println("Unable to bind field to data of type:", data_binding.id)
+                    return false
+                }
+            case runtime.Type_Info_Dynamic_Array:
+                if tiv.elem.size != 1 {
+                    fmt.println("Unable to bind field to data of type:", data_binding.id)
+                    return false
+                }
+            case runtime.Type_Info_Slice:
+                if tiv.elem.size != 1 {
+                    fmt.println("Unable to bind field to data of type:", data_binding.id)
+                    return false
+                }
             case: 
                 fmt.println("Unable to bind field to data of type:", data_binding.id)
                 return false
@@ -346,10 +373,45 @@ set_value_from_string :: proc(value: any, text: string) -> bool {
             }
             return true
 
-        // TODO: add support for bit sets, at least enum type bit sets
+        case Type_Info_Array:
+            if tiv.elem.size != 1 {
+                fmt.println("Unsupported type in set_value_from_string():", value.id)
+                return true
+            }
+            if len(text) >= tiv.count { // leave one byte pad on the end so we can null terminate
+                fmt.printf("Unable to copy string of len %v to [%v]u8\n", len(text), tiv.count)
+                return true
+            }
+            mem.copy(value.data, raw_data(text), len(text))
+            (transmute([^]u8)value.data)[len(text)] = 0 // null terminate
+            return true
+
+        case Type_Info_Slice:
+            slice      := cast(^runtime.Raw_Slice) value.data
+            data       := slice.data
+            elem_count := slice.len
+            if tiv.elem.size != 1 {
+                fmt.println("Unsupported type in set_value_from_string():", value.id)
+                return false
+            }
+            (cast(^string)value.data)^ = strings.clone(text)
+            return true
+    
+        case Type_Info_Dynamic_Array:
+            array      := cast(^runtime.Raw_Dynamic_Array) value.data
+            elem_count := array.len
+            elem_ti    := runtime.type_info_base(tiv.elem)
+            if elem_ti.size != 1 {
+                fmt.println("Unsupported type in set_value_from_string():", value.id)
+                return true
+            }
+            arr_u8 := transmute(^[dynamic]u8) array
+            clear(arr_u8)
+            append_elem_string(arr_u8, text)
+            return true
 
         case:
-            fmt.println("Unsupported type in set_value_from_string().")
+            fmt.println("Unsupported type in set_value_from_string().", value.id)
             return true
     }
     
@@ -367,8 +429,8 @@ array_add_any :: proc(array: any) -> (any, bool) {
 array_add_any_nocheck :: proc(array: ^runtime.Raw_Dynamic_Array, elem_ti: ^runtime.Type_Info) -> any {
     if array.len >= array.cap {
         reserve   := max(2 * array.cap, 8)
-        old_size  := elem_ti.size *  array.len
-        new_size  := elem_ti.size * (array.len + reserve) 
+        old_size  := elem_ti.size *  array.cap
+        new_size  := elem_ti.size * (array.cap + reserve) 
         allocator := array.allocator != {} ? array.allocator : context.allocator
         array.data, _ = mem.resize(array.data, old_size, new_size, elem_ti.align, allocator)
         array.cap = new_size

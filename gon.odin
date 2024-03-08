@@ -8,9 +8,9 @@ import "core:runtime"
 import "core:reflect"
 import "core:mem"
 
-whitespace_chars :: " ,\t\r\n"
+whitespace_chars :: " ,\t\r\n\x00"
 reserved_chars   :: "#{}[]\""
-whitespace_and_reserved_chars :: " ,\t\r\n#{}[]\""
+whitespace_and_reserved_chars :: " ,\t\r\n#{}[]\"\x00"
 
 Token_Type :: enum {
   INVALID,
@@ -138,23 +138,44 @@ skip_whitespace_and_comments :: proc(file: ^string) -> bool {
   }
 }
 
+// only " and \ need to be escaped
+is_escaped_char :: proc(char: u8) -> bool {
+  return char == '\\' || char == '\"'
+}
+
+to_conformant_string :: proc(s: string, force_quotes := false, allocator := context.allocator) -> string {
+  sb := strings.builder_make(allocator)
+  defer strings.builder_destroy(&sb)
+
+  write_quotes := force_quotes || (len(s) == 0) || strings.contains_any(s, whitespace_and_reserved_chars)
+  
+  if write_quotes do strings.write_byte(&sb, '\"')
+
+  for c in (transmute([]u8)s) {
+    if c == 0 do break
+    if is_escaped_char(c) {
+      strings.write_byte(&sb, '\\')
+    }
+    strings.write_byte(&sb, c)
+  }
+
+  if write_quotes do strings.write_byte(&sb, '\"')
+
+  return strings.to_string(sb)
+}
+
+// TODO: unescape_string()
 
 /*
   Trying to just get a quick and dirty solution done, so there are some things done very inefficiently.
     For example, the print_to_builder proc was just inteded to allow me to more easily port my Jai code even though the temp allocations are kinda dumb.
 */
 serialize_any :: proc(
-  sb         : ^strings.Builder, 
-  name       : string, 
-  value      : any, 
-  indent     : int = 0, 
+  sb       : ^strings.Builder, 
+  name     : string, 
+  value    : any, 
+  indent   : int = 0, 
 ) {
-  print_maybe_in_quotes :: proc(sb: ^strings.Builder, name: string) {
-    write_quotes := strings.contains_any(name, whitespace_and_reserved_chars)
-    if write_quotes do strings.write_string(sb, "\"")
-    strings.write_string(sb, name);
-    if write_quotes do strings.write_string(sb, "\"")
-  }
   print_to_builder :: proc(sb: ^strings.Builder, format: string, args: ..any) {
     strings.write_string(sb, fmt.tprintf(format, ..args))
   }
@@ -162,7 +183,7 @@ serialize_any :: proc(
   using runtime
 
   if value.data == nil do return
-  // if all_bytes_are_zero(value) do return // skip serializing zero'd data
+  // if skip_nil && all_bytes_are_zero(value) do return // skip serializing zero'd data
 
   ti := type_info_base(type_info_of(value.id))
   // if ti_named, ok := ti.variant.(Type_Info_Named); ok {
@@ -173,7 +194,9 @@ serialize_any :: proc(
     case Type_Info_Struct: 
       for i in 0..<indent do strings.write_string(sb, " ");
       if name != "" {
-        print_maybe_in_quotes(sb, name);
+        strings.write_string(sb, 
+          to_conformant_string(name, allocator = context.temp_allocator),
+        )
         strings.write_string(sb, " ");
       }
       strings.write_string(sb, "{\n");
@@ -198,6 +221,7 @@ serialize_any :: proc(
       elem_ti    : ^Type_Info
       
       // disambiguate array/slice/dynamic
+      // TODO: should probably just get all types as a raw slice to simplify
       #partial switch tiv in tiv {
         case Type_Info_Array:
           data       = value.data
@@ -219,15 +243,32 @@ serialize_any :: proc(
       }
 
       // skip serializing if all bytes of array data are 0
-      // if all_bytes_are_zero(data, elem_count * elem_ti.size) {
+      // if skip_nil && all_bytes_are_zero(data, elem_count * elem_ti.size) {
       //   return
       // }
 
       for i in 0..<indent do strings.write_string(sb, " ");
       if name != "" {
-        print_maybe_in_quotes(sb, name);
+        strings.write_string(sb, 
+          to_conformant_string(name, allocator = context.temp_allocator),
+        )
         strings.write_string(sb, " ");
       }
+
+      // serialize as a string if the element type is u8
+      if elem_ti.size == 1 {
+        str := transmute(string) runtime.Raw_String {
+          data = auto_cast data,
+          len  = elem_count,
+        }
+        strings.write_string(sb, 
+          to_conformant_string(str, force_quotes = true, allocator = context.temp_allocator),
+        )
+        strings.write_byte(sb, '\n');
+        return 
+      }
+
+      // otherwise, serialize as a standard array
       strings.write_string(sb, "[")
 
       // use a different spacing delimiter between fields vs objects/arrays  
@@ -250,10 +291,13 @@ serialize_any :: proc(
         }
         serialize_any(sb, "", item, indent + 2)
       }
+
+      // we only need to indent the closing bracket if the delimeter was newline
       if delim == "\n" {
         for i in 0..<indent do strings.write_string(sb, " ")
       }
       strings.write_string(sb, "]\n")
+
       return
 
     case Type_Info_Integer: 
@@ -269,19 +313,28 @@ serialize_any :: proc(
       }
       if name != "" {
         for i in 0..<indent do strings.write_string(sb, " ");
-        print_maybe_in_quotes(sb, name);
-        strings.write_string(sb, " ");
-        print_to_builder(sb, "\"%v\"\n", str);
+        strings.write_string(sb, 
+          to_conformant_string(name, allocator = context.temp_allocator),
+        )
+        strings.write_byte(sb, ' ');
+        strings.write_string(sb, 
+          to_conformant_string(str, force_quotes = true, allocator = context.temp_allocator),
+        )
+        strings.write_byte(sb, '\n');
       } else {
-        print_to_builder(sb, "\"%v\" ", str);
+        strings.write_string(sb, 
+          to_conformant_string(str, force_quotes = true, allocator = context.temp_allocator),
+        )
+        strings.write_byte(sb, ' ');
       }
       return
 
     case Type_Info_Bit_Set: 
-      fmt.println(value)
       for i in 0..<indent do strings.write_string(sb, " ");
       if name != "" {
-        print_maybe_in_quotes(sb, name);
+        strings.write_string(sb, 
+          to_conformant_string(name, allocator = context.temp_allocator),
+        )
         strings.write_string(sb, " ");
       }
 
@@ -324,6 +377,8 @@ serialize_any :: proc(
       strings.write_string(sb, "]\n")
       return
 
+
+    // TODO: map[string] T
     case:
       fmt.println("Unable to serialize type", ti)
       return
@@ -331,7 +386,9 @@ serialize_any :: proc(
 
   if name != "" {
     for i in 0..<indent do strings.write_string(sb, " ");
-    print_maybe_in_quotes(sb, name);
+    strings.write_string(sb, 
+      to_conformant_string(name, allocator = context.temp_allocator),
+    )
     strings.write_string(sb, " ");
     print_to_builder(sb, "%v\n", value);
   }
@@ -388,7 +445,6 @@ dynamic_int_cast :: proc(dst, src: any, enforce_size := false) -> bool {
 
   return true
 }
-
 
 dynamic_float_cast :: proc(dst, src: any, enforce_size := false) -> bool {
   using runtime
@@ -477,9 +533,77 @@ Serialization_Flag :: enum {
   // to be used when some data type or struct member represents sensitive data
   // will only be serialized when the corresponding flag is present in the serialization settings
   SENSITIVE,
+
+  // serializes an array as a GON object, using the index of each element as the name for the object
+  SERIALIZE_WITH_INDEX,
 }
 
-Serialization_Settings_Struct :: struct {
+Serialization_Settings :: struct {
+  flags            : Serialization_Flag,
   one_line         : bool,
   member_delimiter : []string, // can have a unique delimiter between each field
 }
+
+// Serialization_Settings_Lookup :: map[typeid]Serialization_Settings
+// Parse_Settings_Lookup         :: map[typeid]Serialization_Settings
+
+Parse_Flags :: bit_set[Parse_Flag]
+Parse_Flag :: enum {
+  PARSE_ARRAY_INDEXED,
+}
+
+Parse_Settings :: struct {
+  flags : Parse_Flags,
+}
+
+
+
+Data_Mappings :: struct {
+
+}
+
+Data_Mappings_Node :: struct {
+
+}
+
+/*
+  We want to minimizew the number of iterations required to convert the individual bindings into a tree
+  We also want to have the nodes in sequential order if possible, 
+
+  split field path strings into string slices
+  iterate over path slices
+    get first incomplete path
+      add nodes for all field names in this path
+
+
+
+  dont want to allow collisions between bindings during serializiation
+    would not be less of an issue during parsing
+      still don't want direct collisions, but we do want to be able to bind to a subfield of an already bound gon object
+*/
+generate_file_bindings :: proc() {
+
+}
+
+Serialization_Context :: struct {
+  settings      : Parse_Settings,
+  builder       : strings.Builder,
+  data_bindings : []Data_Binding,
+}
+
+serialize :: proc() {
+  /*
+      Is it better to naviagte data binding paths individually as we do for parsing, 
+      OR should we construct a simple tree of the data bindings and navigate this instead?
+
+      We can use temp storage to allocate the tree nodes since they will not be needed outside of the serialization procedure.
+
+      It will proably be worthwhile to implement both solutions and test which is faster at different input sizes,
+      but in the short term, just need something that works well.
+
+      The tree method seems a bit more robust, but it also results in needing to allocate more memory, which is one of the major things I have tried to avoid in this parser.
+  */
+}
+
+
+
