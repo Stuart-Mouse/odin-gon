@@ -1,0 +1,382 @@
+
+package gon
+
+import "core:runtime"
+import "core:reflect"
+import "core:fmt"
+import "core:strings"
+import "core:strconv"
+import "core:mem"
+import "core:unicode/utf8"
+
+SAX_Field :: struct {
+    name         : string,
+    value        : string,
+    type         : Field_Type,
+    data_binding : any,
+    parent       : ^SAX_Field,
+    array_index  : int,
+}
+
+SAX_Data_Binding :: struct {
+    binding    : any,
+    field_path : []string,
+    path_depth : int,
+}
+
+SAX_Parse_Context :: struct {
+    file          : string,
+    data_bindings : []SAX_Data_Binding,
+    event_handler : SAX_Event_Handler,
+    field_depth   : int,
+}
+
+SAX_Return_Code :: enum {
+    ERROR    = 0,
+    SUCCESS  = 1,
+
+    SKIP_BINDING,
+}
+
+SAX_Event_Handler :: struct {
+    object_begin,
+    object_end,
+    field_read,
+    field_data_bind,
+    parent_data_bind\
+    : proc(^SAX_Parse_Context, ^SAX_Field) -> SAX_Return_Code
+}
+
+SAX_parse_file :: proc(parse_context: ^SAX_Parse_Context) -> bool {
+    return SAX_parse_object(parse_context, nil)    
+}
+
+SAX_parse_object :: proc(using parse_context: ^SAX_Parse_Context, parent: ^SAX_Field) -> bool {
+    next_token_type : Token_Type
+    next_token      : string
+
+    // refers to the index of the field within the scope of the current parent object
+    field_index := 0
+
+    // process a single field per iteration
+    for ;; field_index += 1 {
+        field : SAX_Field
+        // A pointer to the parent field is stored so that we can traverse up the field stack given only a pointer to the current field.
+        // This is important when writing callback code for the parent_data_bind event handler.
+        field.parent      = parent
+        field.array_index = field_index
+        
+        // read field name
+        if parent == nil || parent.type != .ARRAY {
+            next_token_type, next_token = get_next_token(&file)
+            #partial switch next_token_type {
+                case .EOF:
+                    return true
+                case .STRING:
+                    field.name = next_token
+                case .OBJECT_END:
+                    if parent.type != .OBJECT {
+                        fmt.printf("GON parse error: Unexpected %v token \"%v\".\n", next_token_type, next_token)
+                        return false
+                    }
+                    return true
+                case:
+                    fmt.printf("GON parse error: Unexpected %v token \"%v\".\n", next_token_type, next_token)
+                    return false
+            }
+        } else { // parent type is .ARRAY
+            field.name = fmt.tprintf("%v[%v]", parent.name, field_index)
+        }
+
+        // read field value and append
+        next_token_type, next_token = get_next_token(&file)
+        #partial switch next_token_type {
+            case .STRING:
+                field.type = .FIELD
+                field.value = next_token
+            case .OBJECT_BEGIN:
+                field.type = .OBJECT
+            case .ARRAY_BEGIN:
+                field.type = .ARRAY
+            case .ARRAY_END:
+                if parent.type != .ARRAY {
+                    fmt.printf("GON parse error: Unexpected %v token \"%v\".\n", next_token_type, next_token);
+                    return false
+                }
+                return true
+            case:
+                fmt.printf("GON parse error: Unexpected %v token \"%v\".\n", next_token_type, next_token);
+                return false
+        }
+
+        // direct data bindings
+        for &b in data_bindings {
+            // check that field address matched up to this point
+            // also skip completed matches
+            if b.path_depth < field_depth || 
+               len(b.field_path) <= field_depth {
+                continue
+            }
+
+            // check if field_path[field_depth] is a match
+            if field.name != b.field_path[field_depth] {
+                continue
+            }
+            b.path_depth += 1;
+
+            // check if we've matched the entire field address
+            if len(b.field_path) == b.path_depth {
+                b.path_depth = -1; // deactivate the binding so that it will be skipped in future checks
+
+                if !set_field_data_binding(parse_context, &field, b.binding) {
+                    return false
+                }
+            }
+        }
+
+        // indirect data bindings
+        if parent != nil && parent.data_binding != nil {
+            parent_binding_ti := runtime.type_info_base(type_info_of(parent.data_binding.id))
+
+            #partial switch &parent_tiv in parent_binding_ti.variant {
+                case runtime.Type_Info_Bit_Set:
+                    assert(parent.type == .ARRAY) // TODO
+                    if !set_field_data_binding(parse_context, &field, parent.data_binding) {
+                        return false
+                    }
+
+                case runtime.Type_Info_Dynamic_Array:
+                    assert(parent.type == .ARRAY) // TODO
+                    field_data_binding := array_add_any(parent.data_binding) or_return
+                    if !set_field_data_binding(parse_context, &field, field_data_binding) {
+                        return false
+                    }
+
+                case runtime.Type_Info_Array:
+                    assert(parent.type == .ARRAY) // TODO
+                    raw_slice := cast(^runtime.Raw_Slice) parent.data_binding.data
+                    if field_index >= parent_tiv.count {
+                        fmt.println("Unable to add to array, ran out of space.")
+                        return false
+                    } else {
+                        elem_ti := runtime.type_info_base(parent_tiv.elem)
+                        field_data_binding := any {
+                            data = mem.ptr_offset(cast(^u8)parent.data_binding.data, elem_ti.size * field_index),
+                            id   = elem_ti.id,
+                        }
+                        if !set_field_data_binding(parse_context, &field, field_data_binding) {
+                            return false
+                        }
+                    }
+
+                case runtime.Type_Info_Slice:
+                    assert(parent.type == .ARRAY) // TODO
+                    raw_slice := cast(^runtime.Raw_Slice) parent.data_binding.data
+                    if field_index >= raw_slice.len {
+                        fmt.println("Unable to add to slice, ran out of space.")
+                        return false
+                    } else {
+                        elem_ti := runtime.type_info_base(parent_tiv.elem)
+                        field_data_binding := any {
+                            data = mem.ptr_offset(cast(^u8)raw_slice.data, elem_ti.size * field_index),
+                            id   = elem_ti.id,
+                        }
+                        if !set_field_data_binding(parse_context, &field, field_data_binding) {
+                            return false
+                        }
+                    }
+
+                case runtime.Type_Info_Struct:
+                    member : reflect.Struct_Field
+                    #partial switch parent.type {
+                        case .ARRAY  : member = reflect.struct_field_at(parent_binding_ti.id, field_index)
+                        case .OBJECT : member = reflect.struct_field_by_name(parent_binding_ti.id, field.name) 
+                    }
+                    if member != {} {
+                        data_binding: any = {
+                            data = mem.ptr_offset(cast(^u8)parent.data_binding.data, member.offset),
+                            id   = member.type.id,
+                        }
+                        if !set_field_data_binding(parse_context, &field, data_binding) {
+                            return false
+                        } 
+                    }
+            }
+        }
+
+        // recurse for object / array
+        if field.type == .OBJECT || field.type == .ARRAY {
+            field_depth += 1
+            SAX_parse_object(parse_context, &field) or_return
+            field_depth -= 1
+            for &b in data_bindings {
+                if b.path_depth > field_depth {
+                    b.path_depth -= 1
+                }
+            }
+        }
+    }
+}
+
+set_field_data_binding :: proc(using parse_context: ^SAX_Parse_Context, field: ^SAX_Field, data_binding: any) -> bool {
+    // fmt.println("binding to field:", field.name)
+    
+    binding_ti := runtime.type_info_base(type_info_of(data_binding.id))
+    if field.type == .FIELD {
+        // restrict types to which we can bind
+        #partial switch tiv in binding_ti.variant {
+            case runtime.Type_Info_Integer:
+            case runtime.Type_Info_Float:
+            case runtime.Type_Info_Enum:
+            case runtime.Type_Info_String:
+            case runtime.Type_Info_Bit_Set:
+            case runtime.Type_Info_Boolean:
+            case: 
+                fmt.println("Unable to bind field to data of type:", data_binding.id)
+                return false
+        }
+        field.data_binding = data_binding
+        if !set_value_from_string(data_binding, field.value) {
+            return false
+        }
+    }
+    else { // field type is either object or array
+        #partial switch tiv in binding_ti.variant {
+            case runtime.Type_Info_Array:
+            case runtime.Type_Info_Dynamic_Array:
+            case runtime.Type_Info_Slice:
+            case runtime.Type_Info_Bit_Set:
+                // no op
+            case runtime.Type_Info_Struct:
+                // mem.set(data_binding.data, 0, binding_ti.size)
+            case:
+                fmt.println("Unable to bind object or array to data of type:", data_binding.id)
+                return false
+        }
+        field.data_binding = data_binding
+    }
+    return true // ?
+}
+
+
+set_value_from_string :: proc(value: any, text: string) -> bool {
+    using runtime
+    if text == "" {
+        return true
+    }
+
+    ti := type_info_base(type_info_of(value.id))
+
+    #partial switch &tiv in ti.variant {
+        case Type_Info_Integer:
+            if !dynamic_int_cast(value, strconv.atoi(text)) {
+                return false
+            }
+            return true
+
+        case Type_Info_Float:
+            if !dynamic_float_cast(value, strconv.atof(text)) {
+                return false
+            }
+            return true
+
+        case Type_Info_Enum:
+            for name, index in tiv.names {
+                if name == text {
+                    switch ti.size {
+                        case 1: (cast(^u8 )value.data)^ = auto_cast tiv.values[index]
+                        case 2: (cast(^u16)value.data)^ = auto_cast tiv.values[index]
+                        case 4: (cast(^u32)value.data)^ = auto_cast tiv.values[index]
+                        case 8: (cast(^u64)value.data)^ = auto_cast tiv.values[index]      
+                    }
+                    return true
+                }
+            }
+            return true
+
+        case Type_Info_Bit_Set:
+            i64_value: u64
+            dynamic_int_cast(i64_value, value)
+            bytes := transmute(^[8]byte) &i64_value
+
+            elem_ti := type_info_base(tiv.elem)
+            #partial switch elem_tiv in elem_ti.variant {
+                case Type_Info_Integer:
+                    bit := cast(i64) strconv.atoi(text)
+                    if bit >= tiv.lower && bit <= tiv.upper {
+                        bit -= tiv.lower
+                        bytes[bit / 8] |= u8(1 << u64(bit % 8))
+                    }
+                case Type_Info_Rune:
+                    rune_value, _ := utf8.decode_rune_in_string(text)
+                    bit := cast(i64) rune_value
+                    if bit >= tiv.lower && bit <= tiv.upper {
+                        bit -= tiv.lower
+                        bytes[bit / 8] |= u8(1 << u64(bit % 8))
+                    }
+                case Type_Info_Enum:
+                    for name, index in elem_tiv.names {
+                        if index >= int(tiv.lower) && index <= int(tiv.upper) && name == text  {
+                            bit := int(elem_tiv.values[index]) - int(tiv.lower)
+                            bytes[bit / 8] |= u8(1 << u64(bit % 8))
+                        }
+                    }
+            }
+
+            dynamic_int_cast(value, i64_value)
+            return true
+
+        case Type_Info_String:
+            string_value := strings.clone(text)
+            if tiv.is_cstring {
+                (cast(^cstring)value.data)^ = cstring(raw_data(string_value))
+            } else {
+                (cast(^string)value.data)^ = string_value
+            }
+            return true
+
+        case Type_Info_Boolean:
+            if text[0] == 't' || text[0] == 'T' {
+                switch ti.size {
+                    case 1: (cast(^b8 )value.data)^ = true
+                    case 2: (cast(^b16)value.data)^ = true
+                    case 4: (cast(^b32)value.data)^ = true
+                    case 8: (cast(^b64)value.data)^ = true
+                }
+            }
+            return true
+
+        // TODO: add support for bit sets, at least enum type bit sets
+
+        case:
+            fmt.println("Unsupported type in set_value_from_string().")
+            return true
+    }
+    
+    return true
+}
+
+array_add_any :: proc(array: any) -> (any, bool) {
+    ti := type_info_of(array.id)
+    if ti_array, ok := ti.variant.(runtime.Type_Info_Dynamic_Array); ok {
+        return array_add_any_nocheck(auto_cast array.data, ti_array.elem), true
+    }
+    return {}, false
+}
+
+array_add_any_nocheck :: proc(array: ^runtime.Raw_Dynamic_Array, elem_ti: ^runtime.Type_Info) -> any {
+    if array.len >= array.cap {
+        reserve   := max(2 * array.cap, 8)
+        old_size  := elem_ti.size *  array.len
+        new_size  := elem_ti.size * (array.len + reserve) 
+        allocator := array.allocator != {} ? array.allocator : context.allocator
+        array.data, _ = mem.resize(array.data, old_size, new_size, elem_ti.align, allocator)
+        array.cap = new_size
+    }
+    array.len += 1
+    return {
+        data = mem.ptr_offset(cast(^u8) array.data, array.len * elem_ti.size),
+        id   = elem_ti.id, 
+    }
+}
+
