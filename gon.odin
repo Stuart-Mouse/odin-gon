@@ -176,10 +176,6 @@ serialize_any :: proc(
   value    : any, 
   indent   : int = 0, 
 ) {
-  print_to_builder :: proc(sb: ^strings.Builder, format: string, args: ..any) {
-    strings.write_string(sb, fmt.tprintf(format, ..args))
-  }
-
   using runtime
 
   if value.data == nil do return
@@ -378,7 +374,34 @@ serialize_any :: proc(
       return
 
 
-    // TODO: map[string] T
+    // case Type_Info_Map:
+    //   raw_map := transmute(^Raw_Map) value.data
+    //   #partial switch ti_key in runtime.type_info_base(tiv.key).variant {
+    //     case Type_Info_String:
+    //       for i in 0..<indent do strings.write_string(sb, " ");
+    //       if name != "" {
+    //         strings.write_string(sb, 
+    //           to_conformant_string(name, allocator = context.temp_allocator),
+    //         )
+    //         strings.write_string(sb, " ");
+    //       }
+    //       strings.write_string(sb, "{\n");
+
+    //       ks, vs, hs, sk, sv := map_kvh_data_dynamic(raw_map^, tiv.map_info)
+    //       for i in 0..<raw_map.len {
+    //         serialize_any(sb, 
+    //           (cast(^string)mem.ptr_offset(cast(^u8)ks, i * sk))^,
+    //           any { mem.ptr_offset(cast(^u8)vs, i * sv), tiv.value.id },
+    //         )
+    //       }
+
+    //       for i in 0..<indent do strings.write_string(sb, " ")
+    //       strings.write_string(sb, "}\n")
+
+    //     case: 
+    //       fmt.printf("Unable to serialize type: %v\nCurrently, only maps with string keys are supported.", ti)
+    //       return
+    //   }
     case:
       fmt.println("Unable to serialize type", ti)
       return
@@ -390,10 +413,10 @@ serialize_any :: proc(
       to_conformant_string(name, allocator = context.temp_allocator),
     )
     strings.write_string(sb, " ");
-    print_to_builder(sb, "%v\n", value);
+    fmt.sbprintf(sb, "%v\n", value);
   }
   else {
-    print_to_builder(sb, "%v ", value);
+    fmt.sbprintf(sb, "%v ", value);
   }
 }
 
@@ -509,7 +532,6 @@ all_bytes_are_zero_data :: proc(data: rawptr, len: int) -> bool {
   return true
 }
 
-// TODO: needs further implementation
 Serialization_Flags :: bit_set[Serialization_Flag]
 Serialization_Flag :: enum {
   // when applied to a struct member, that member will never be serialized 
@@ -535,17 +557,18 @@ Serialization_Flag :: enum {
   SENSITIVE,
 
   // serializes an array as a GON object, using the index of each element as the name for the object
-  SERIALIZE_WITH_INDEX,
+  SERIALIZE_ARRAY_INDEXED,
 }
 
 Serialization_Settings :: struct {
   flags            : Serialization_Flag,
   one_line         : bool,
   member_delimiter : []string, // can have a unique delimiter between each field
-}
 
-// Serialization_Settings_Lookup :: map[typeid]Serialization_Settings
-// Parse_Settings_Lookup         :: map[typeid]Serialization_Settings
+  // If you want to use a completely custom serialization procedure for a given data type.
+  // I would recommend against using this in general, unless you need to implement serialization for some complex data structure.
+  serialize_proc   : proc(^strings.Builder, any) -> bool,
+}
 
 Parse_Flags :: bit_set[Parse_Flag]
 Parse_Flag :: enum {
@@ -554,56 +577,67 @@ Parse_Flag :: enum {
 
 Parse_Settings :: struct {
   flags : Parse_Flags,
+  // add type-specific callbacks
+
+  parse_proc : proc(^SAX_Parse_Context) -> SAX_Return_Code
 }
 
-
-
-Data_Mappings :: struct {
-
-}
-
-Data_Mappings_Node :: struct {
-
+IO_Data :: struct {
+  parse     : Parse_Settings,
+  serialize : Serialization_Settings,
 }
 
 /*
-  We want to minimizew the number of iterations required to convert the individual bindings into a tree
-  We also want to have the nodes in sequential order if possible, 
-
-  split field path strings into string slices
-  iterate over path slices
-    get first incomplete path
-      add nodes for all field names in this path
-
-
-
-  dont want to allow collisions between bindings during serializiation
-    would not be less of an issue during parsing
-      still don't want direct collisions, but we do want to be able to bind to a subfield of an already bound gon object
+  Add parsing/serialization settings data for all of your data types here at startup.
 */
-generate_file_bindings :: proc() {
+IO_Data_Lookup : map[typeid]IO_Data
 
-}
+// Data_Mappings :: struct {
 
-Serialization_Context :: struct {
-  settings      : Parse_Settings,
-  builder       : strings.Builder,
-  data_bindings : []Data_Binding,
-}
+// }
 
-serialize :: proc() {
-  /*
-      Is it better to naviagte data binding paths individually as we do for parsing, 
-      OR should we construct a simple tree of the data bindings and navigate this instead?
+// Data_Mappings_Node :: struct {
 
-      We can use temp storage to allocate the tree nodes since they will not be needed outside of the serialization procedure.
+// }
 
-      It will proably be worthwhile to implement both solutions and test which is faster at different input sizes,
-      but in the short term, just need something that works well.
+// generate_file_bindings :: proc(bindings: []Data_Binding) -> Data_Mappings {
+//   for {
+//     all_complete := false
 
-      The tree method seems a bit more robust, but it also results in needing to allocate more memory, which is one of the major things I have tried to avoid in this parser.
-  */
-}
 
+
+//     if all_complete do break
+//   }
+// }
+
+// Serialization_Context :: struct {
+//   settings      : Parse_Settings,
+//   builder       : strings.Builder,
+//   data_bindings : []Data_Binding,
+// }
+
+// serialize_file :: proc()
+
+// serialize_object :: proc(using serialization_context: ^Serialization_Context) {
+//   prep_data_bindings(data_bindings)
+
+//   // direct data bindings
+//   for &b in data_bindings {
+//     // check if _field_path[_field_depth] is a match
+//     if field.name != b._field_path[_field_depth] {
+//       continue
+//     }
+//     b._path_depth += 1;
+
+//     // check if we've matched the entire field address
+//     if len(b._field_path) == b._path_depth {
+//       b._path_depth = -1; // deactivate the binding so that it will be skipped in future checks
+
+//       if !set_field_data_binding(parse_context, &field, b.binding) {
+//         return false
+//       }
+//     }
+//   }
+// }
 
 

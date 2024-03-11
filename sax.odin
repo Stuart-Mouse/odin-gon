@@ -56,10 +56,14 @@ SAX_Event_Handler :: struct {
     : proc(^SAX_Parse_Context, ^SAX_Field) -> SAX_Return_Code
 }
 
-SAX_parse_file :: proc(using parse_context: ^SAX_Parse_Context) -> bool {
+prep_data_bindings :: proc(data_bindings: []Data_Binding) {
     for &b in data_bindings {
         b._field_path = strings.split(b.field_path, "/", allocator = context.temp_allocator)
     }
+}
+
+SAX_parse_file :: proc(using parse_context: ^SAX_Parse_Context) -> bool {
+    prep_data_bindings(data_bindings)
     return SAX_parse_object(parse_context, nil)    
 }
 
@@ -121,38 +125,55 @@ SAX_parse_object :: proc(using parse_context: ^SAX_Parse_Context, parent: ^SAX_F
                 return false
         }
 
-        // direct data bindings
-        for &b in data_bindings {
-            // check that field address matched up to this point
-            // also skip completed matches
-            if b._path_depth < _field_depth || 
-               len(b._field_path) <= _field_depth {
-                continue
+        L_Direct_Binding: {
+            event_result: SAX_Return_Code = .SUCCESS;
+            if event_handler.field_read != nil {
+                event_result = event_handler.field_read(parse_context, &field)
+                if event_result == .ERROR do return false;
+            }
+            if event_result == .SKIP_BINDING {
+                break L_Direct_Binding
             }
 
-            // check if _field_path[_field_depth] is a match
-            if field.name != b._field_path[_field_depth] {
-                continue
-            }
-            b._path_depth += 1;
+            for &b in data_bindings {
+                // check that field address matched up to this point
+                // also skip completed matches
+                if b._path_depth < _field_depth || 
+                len(b._field_path) <= _field_depth {
+                    continue
+                }
 
-            // check if we've matched the entire field address
-            if len(b._field_path) == b._path_depth {
-                b._path_depth = -1; // deactivate the binding so that it will be skipped in future checks
+                // check if _field_path[_field_depth] is a match
+                if field.name != b._field_path[_field_depth] {
+                    continue
+                }
+                b._path_depth += 1;
 
-                if !set_field_data_binding(parse_context, &field, b.binding) {
-                    return false
+                // check if we've matched the entire field address
+                if len(b._field_path) == b._path_depth {
+                    b._path_depth = -1; // deactivate the binding so that it will be skipped in future checks
+
+                    if !set_field_data_binding(parse_context, &field, b.binding) {
+                        return false
+                    }
                 }
             }
         }
+        
+        L_Indirect_Binding: if parent != nil && parent.data_binding != nil {
+            event_result: SAX_Return_Code = .SUCCESS;
+            if event_handler.parent_data_bind != nil {
+                event_result = event_handler.parent_data_bind(parse_context, &field)
+                if event_result == .ERROR do return false;
+            }
+            if event_result == .SKIP_BINDING {
+                break L_Indirect_Binding
+            }
 
-        // indirect data bindings
-        if parent != nil && parent.data_binding != nil {
             parent_binding_ti := runtime.type_info_base(type_info_of(parent.data_binding.id))
-
             #partial switch &parent_tiv in parent_binding_ti.variant {
                 case runtime.Type_Info_Bit_Set:
-                    assert(parent.type == .ARRAY) // TODO
+                    assert(parent.type == .ARRAY)
                     if !set_field_data_binding(parse_context, &field, parent.data_binding) {
                         return false
                     }
@@ -219,8 +240,22 @@ SAX_parse_object :: proc(using parse_context: ^SAX_Parse_Context, parent: ^SAX_F
         // recurse for object / array
         if field.type == .OBJECT || field.type == .ARRAY {
             _field_depth += 1
+
+            event_result: SAX_Return_Code = .SUCCESS;
+            if event_handler.object_begin != nil {
+                event_result = event_handler.object_begin(parse_context, &field)
+                if event_result == .ERROR do return false
+            }
+
             SAX_parse_object(parse_context, &field) or_return
+
+            if event_handler.object_end != nil {
+                event_result = event_handler.object_end(parse_context, &field)
+                if event_result == .ERROR do return false
+            }
+
             _field_depth -= 1
+
             for &b in data_bindings {
                 if b._path_depth > _field_depth {
                     b._path_depth -= 1
@@ -231,8 +266,21 @@ SAX_parse_object :: proc(using parse_context: ^SAX_Parse_Context, parent: ^SAX_F
 }
 
 set_field_data_binding :: proc(using parse_context: ^SAX_Parse_Context, field: ^SAX_Field, data_binding: any) -> bool {
-    // fmt.println("binding to field:", field.name)
-    
+    field.data_binding = data_binding
+
+    // handle field_data_bind event
+    event_result: SAX_Return_Code = .SUCCESS;
+    if event_handler.field_data_bind != nil {
+        event_result = event_handler.field_data_bind(parse_context, field);
+        if event_result == .ERROR {
+            return false
+        }
+        if event_result == .SKIP_BINDING {
+            field.data_binding = {}
+            return true
+        }
+    }
+
     binding_ti := runtime.type_info_base(type_info_of(data_binding.id))
     if field.type == .FIELD {
         // restrict types to which we can bind
@@ -262,7 +310,6 @@ set_field_data_binding :: proc(using parse_context: ^SAX_Parse_Context, field: ^
                 fmt.println("Unable to bind field to data of type:", data_binding.id)
                 return false
         }
-        field.data_binding = data_binding
         if !set_value_from_string(data_binding, field.value) {
             return false
         }
@@ -280,7 +327,6 @@ set_field_data_binding :: proc(using parse_context: ^SAX_Parse_Context, field: ^
                 fmt.println("Unable to bind object or array to data of type:", data_binding.id)
                 return false
         }
-        field.data_binding = data_binding
     }
     return true // ?
 }
@@ -292,7 +338,10 @@ set_value_from_string :: proc(value: any, text: string) -> bool {
         return true
     }
 
-    ti := type_info_base(type_info_of(value.id))
+    ti := type_info_of(value.id)
+    if _, ok := ti.variant.(Type_Info_Named); ok {
+        ti = type_info_base(ti)
+    }
 
     #partial switch &tiv in ti.variant {
         case Type_Info_Integer:
