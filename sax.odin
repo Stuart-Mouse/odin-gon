@@ -15,14 +15,9 @@ SAX_Field :: struct {
     type         : Field_Type,
     data_binding : any,
     parent       : ^SAX_Field,
-    array_index  : int,
+    index        : int,
     // flags        : SAX_Field_Flags,
 }
-
-// SAX_Field_Flags :: bit_set[SAX_Field_Flag]
-// SAX_Field_Flag :: enum {
-
-// }   
 
 Data_Binding :: struct {
     binding     : any,
@@ -41,19 +36,20 @@ SAX_Parse_Context :: struct {
 }
 
 SAX_Return_Code :: enum {
-    ERROR    = 0,
-    SUCCESS  = 1, // TODO: rename to OK
+    ERROR = 0,
+    OK    = 1, // TODO: rename to OK
 
     SKIP_BINDING,
 }
+
+SAX_Event_Handler_Proc :: proc(^SAX_Parse_Context, ^SAX_Field) -> SAX_Return_Code
 
 SAX_Event_Handler :: struct {
     object_begin,
     object_end,
     field_read,
     field_data_bind,
-    parent_data_bind\
-    : proc(^SAX_Parse_Context, ^SAX_Field) -> SAX_Return_Code
+    parent_data_bind : SAX_Event_Handler_Proc
 }
 
 prep_data_bindings :: proc(data_bindings: []Data_Binding) {
@@ -76,11 +72,10 @@ SAX_parse_object :: proc(using parse_context: ^SAX_Parse_Context, parent: ^SAX_F
 
     // process a single field per iteration
     for ;; field_index += 1 {
-        field : SAX_Field
-        // A pointer to the parent field is stored so that we can traverse up the field stack given only a pointer to the current field.
-        // This is important when writing callback code for the parent_data_bind event handler.
-        field.parent      = parent
-        field.array_index = field_index
+        field: SAX_Field = {
+            parent = parent,
+            index  = field_index,
+        }
         
         // read field name
         if parent == nil || parent.type != .ARRAY {
@@ -100,8 +95,6 @@ SAX_parse_object :: proc(using parse_context: ^SAX_Parse_Context, parent: ^SAX_F
                     fmt.printf("GON parse error: Unexpected %v token \"%v\".\n", next_token_type, next_token)
                     return false
             }
-        } else { // parent type is .ARRAY
-            field.name = fmt.tprintf("%v[%v]", parent.name, field_index)
         }
 
         // read field value and append
@@ -126,7 +119,7 @@ SAX_parse_object :: proc(using parse_context: ^SAX_Parse_Context, parent: ^SAX_F
         }
 
         L_Direct_Binding: {
-            event_result: SAX_Return_Code = .SUCCESS;
+            event_result: SAX_Return_Code = .OK;
             if event_handler.field_read != nil {
                 event_result = event_handler.field_read(parse_context, &field)
                 if event_result == .ERROR do return false;
@@ -161,7 +154,7 @@ SAX_parse_object :: proc(using parse_context: ^SAX_Parse_Context, parent: ^SAX_F
         }
         
         L_Indirect_Binding: if parent != nil && parent.data_binding != nil {
-            event_result: SAX_Return_Code = .SUCCESS;
+            event_result: SAX_Return_Code = .OK;
             if event_handler.parent_data_bind != nil {
                 event_result = event_handler.parent_data_bind(parse_context, &field)
                 if event_result == .ERROR do return false
@@ -175,15 +168,19 @@ SAX_parse_object :: proc(using parse_context: ^SAX_Parse_Context, parent: ^SAX_F
                 case runtime.Type_Info_Map:
                     assert(parent.type == .OBJECT)
                     raw_map := cast(^runtime.Raw_Map) parent.data_binding.data
-                    key     := cast(uintptr) &field.name
-                    hash    := cast(runtime.Map_Hash) parent_tiv.map_info.key_hasher(rawptr(key), runtime.map_seed(raw_map^))
+                    
+                    // This is a leak, need to figure out how to give the user some idea that he needs to clone these strings and manage them himself.
+                    name_copy := strings.clone(field.name)
+                    key       := cast(rawptr) &name_copy
+                    
+                    runtime.__dynamic_map_check_grow(raw_map, parent_tiv.map_info)
                     
                     // allocate empty space that can be safely memcopied from
                     // this has to be done because apparently there's no way to insert a hash dynamically without passing a value
-                    empty_value := cast(uintptr) raw_data(make([]u8, parent_tiv.value.size, context.temp_allocator))
-                    
-                    value := runtime.map_insert_hash_dynamic(
-                        raw_map, parent_tiv.map_info, hash, key, empty_value,
+                    empty_value := cast(rawptr) raw_data(make([]u8, parent_tiv.value.size, context.temp_allocator))
+
+                    value := runtime.__dynamic_map_set_without_hash(
+                        raw_map, parent_tiv.map_info, key, empty_value,
                     )
                     
                     if !set_field_data_binding(parse_context, &field, any{rawptr(value), parent_tiv.value.id}) {
@@ -259,7 +256,7 @@ SAX_parse_object :: proc(using parse_context: ^SAX_Parse_Context, parent: ^SAX_F
         if field.type == .OBJECT || field.type == .ARRAY {
             _field_depth += 1
 
-            event_result: SAX_Return_Code = .SUCCESS;
+            event_result: SAX_Return_Code = .OK;
             if event_handler.object_begin != nil {
                 event_result = event_handler.object_begin(parse_context, &field)
                 if event_result == .ERROR do return false
@@ -284,10 +281,12 @@ SAX_parse_object :: proc(using parse_context: ^SAX_Parse_Context, parent: ^SAX_F
 }
 
 set_field_data_binding :: proc(using parse_context: ^SAX_Parse_Context, field: ^SAX_Field, data_binding: any) -> bool {
+    // Set the data binding right away. 
+    // This data binding can be removed/canceled by the event handler or type-specific handling.
     field.data_binding = data_binding
 
     // handle field_data_bind event
-    event_result: SAX_Return_Code = .SUCCESS;
+    event_result: SAX_Return_Code = .OK;
     if event_handler.field_data_bind != nil {
         event_result = event_handler.field_data_bind(parse_context, field);
         if event_result == .ERROR {
@@ -298,6 +297,12 @@ set_field_data_binding :: proc(using parse_context: ^SAX_Parse_Context, field: ^
             return true
         }
     }
+    
+    // type-specific handling
+    type_io_data, found := IO_Data_Lookup[ield.data_binding.id]
+    if found {
+        
+    }    
 
     binding_ti := runtime.type_info_base(type_info_of(data_binding.id))
     if field.type == .FIELD {

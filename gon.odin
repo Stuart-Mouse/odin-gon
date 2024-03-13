@@ -591,15 +591,16 @@ Parse_Settings :: struct {
     parse_proc : proc(^SAX_Parse_Context) -> SAX_Return_Code
 }
 
-IO_Data :: struct {
-    parse     : Parse_Settings,
-    serialize : Serialization_Settings,
-}
 
 /*
   Add parsing/serialization settings data for all of your data types here at startup.
 */
 IO_Data_Lookup : map[typeid]IO_Data
+
+IO_Data :: struct {
+    parse     : Parse_Settings,
+    serialize : Serialization_Settings,
+}
 
 // Data_Mappings :: struct {
 

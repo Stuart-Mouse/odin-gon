@@ -29,6 +29,20 @@ create a window for generally browsing all of the major static data structures i
 
 ### Parsing
 
+add the ability to create a data binding to a field whose name contains the / character.
+    this is not currently possible because we don't handle escaping characters when splitting a field path string
+    indirect data bindings still work fine though
+
+add the option to disable indirect data bindings
+    as a general option
+    on specific data types
+    on a particular data binding    
+
+implement a field_mappings file that specifies all data bindings 
+    similar use case to XSLTs, where we may need to change the mappings of fields without wanting to change it in code
+    not of much use to me personally, but would still be a good proof of concept
+    on top of this, we could create a general callback that will dispatch to other field processing procs based on the content of the field_mappings file
+
 implement callbacks
     create some helpful utility callbacks and provide them with the library
         setting a separate array count variable when writing to a static array or slice (needs to also prevent data binding to this field)
@@ -44,13 +58,15 @@ lookup {
 ```
 
 parse map[string] T types
-
+    fix memory leak issue
+        should it just be part of the API that the user needs to handle any strings read in as map keys? 
+    
 
 struct intialization
-    always zero memory
+    always zero memory?
         only when parent is array
     callback to set value instead
-        setup map[type] (proc(^type) -> bool) to init certain types automagically?
+        setup map[typeid] (proc(^type) -> bool) to init certain types automagically?
 
 allocations for pointers and slices
     want to have the option to specify an allocator for data bindings.
@@ -60,6 +76,8 @@ allocations for pointers and slices
     for pointers, we may want to either allocate the object individually, or we can pass a secondary data binding
         this secondary binding will be the actual backing storage location for the object we are pointing to
         if this backing location is a slice, we may use the provided allocator to alloc/realloc as we would for a normal slice data binding
+
+
 
 
 ### Serialization
@@ -102,6 +120,21 @@ Would be awesome if we had structured notes in Jai so that we could just define 
 
 we could define this struct anyhow and just add it to a map at runtime
 May even be cleaner to do this instead, and actually possible in most languages.
+
+
+Probably need to maintain two separate serialization procedures.
+
+simple_serialize
+    serialize an object "as-is" with default names
+    
+mapped_serialize
+    serialize fields based on a set of data bindings, more like a reversed version of the parsing procedure
+    may need to generate a basic DOM for structure?
+    
+
+                     
+
+
 
 
 
