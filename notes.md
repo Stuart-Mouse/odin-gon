@@ -43,6 +43,8 @@ lookup {
 }
 ```
 
+parse map[string] T types
+
 
 struct intialization
     always zero memory
@@ -64,6 +66,9 @@ allocations for pointers and slices
 
 *not yet implemented*
 
+Implemented serialization of map[string] T types
+  still should probably implement maps with int/enum keys
+
 serialize to a nested path
     this will require totally rewriting the serialization procedure to be more non-linear
     but it seems like a worthwhile addition, since it will grant a lot more flexibility to change how a file is serialized/parsed without requiring some kind of callback weirdness.
@@ -73,6 +78,8 @@ Serialize []u8 and [dynamic]u8 types as strings
         @gon_serialize_as_string
         @gon_serialize_as_bytes
     The second option sort of implies actually storing the array using the yet-implemented @BIN(XX) syntax
+    Currently implemented, but no option to opt out (will do when implementing special parse procs for types)
+
 
 serialize data through pointers (again, optionally)
 

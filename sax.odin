@@ -42,7 +42,7 @@ SAX_Parse_Context :: struct {
 
 SAX_Return_Code :: enum {
     ERROR    = 0,
-    SUCCESS  = 1,
+    SUCCESS  = 1, // TODO: rename to OK
 
     SKIP_BINDING,
 }
@@ -164,7 +164,7 @@ SAX_parse_object :: proc(using parse_context: ^SAX_Parse_Context, parent: ^SAX_F
             event_result: SAX_Return_Code = .SUCCESS;
             if event_handler.parent_data_bind != nil {
                 event_result = event_handler.parent_data_bind(parse_context, &field)
-                if event_result == .ERROR do return false;
+                if event_result == .ERROR do return false
             }
             if event_result == .SKIP_BINDING {
                 break L_Indirect_Binding
@@ -172,6 +172,24 @@ SAX_parse_object :: proc(using parse_context: ^SAX_Parse_Context, parent: ^SAX_F
 
             parent_binding_ti := runtime.type_info_base(type_info_of(parent.data_binding.id))
             #partial switch &parent_tiv in parent_binding_ti.variant {
+                case runtime.Type_Info_Map:
+                    assert(parent.type == .OBJECT)
+                    raw_map := cast(^runtime.Raw_Map) parent.data_binding.data
+                    key     := cast(uintptr) &field.name
+                    hash    := cast(runtime.Map_Hash) parent_tiv.map_info.key_hasher(rawptr(key), runtime.map_seed(raw_map^))
+                    
+                    // allocate empty space that can be safely memcopied from
+                    // this has to be done because apparently there's no way to insert a hash dynamically without passing a value
+                    empty_value := cast(uintptr) raw_data(make([]u8, parent_tiv.value.size, context.temp_allocator))
+                    
+                    value := runtime.map_insert_hash_dynamic(
+                        raw_map, parent_tiv.map_info, hash, key, empty_value,
+                    )
+                    
+                    if !set_field_data_binding(parse_context, &field, any{rawptr(value), parent_tiv.value.id}) {
+                        return false
+                    }
+            
                 case runtime.Type_Info_Bit_Set:
                     assert(parent.type == .ARRAY)
                     if !set_field_data_binding(parse_context, &field, parent.data_binding) {
@@ -320,6 +338,7 @@ set_field_data_binding :: proc(using parse_context: ^SAX_Parse_Context, field: ^
             case runtime.Type_Info_Dynamic_Array:
             case runtime.Type_Info_Slice:
             case runtime.Type_Info_Bit_Set:
+            case runtime.Type_Info_Map:
                 // no op
             case runtime.Type_Info_Struct:
                 // mem.set(data_binding.data, 0, binding_ti.size)
