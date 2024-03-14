@@ -59,8 +59,32 @@ prep_data_bindings :: proc(data_bindings: []Data_Binding) {
 }
 
 SAX_parse_file :: proc(using parse_context: ^SAX_Parse_Context) -> bool {
-    prep_data_bindings(data_bindings)
-    return SAX_parse_object(parse_context, nil)    
+    root := SAX_Field {
+        name   = "root",
+        type   = .OBJECT,
+        parent = nil,
+    }
+
+    // TODO: we should probably verify that the path strings actually conform to the standard for gon strings
+
+    // split the paths for all data bindings before parsing
+    for &b in data_bindings {
+        if b.field_path == "" {
+            // an empty path means we are binding to the root of the file
+            // we can only have one binding to the root of the file!
+            if root.data_binding == nil {
+                root.data_binding = b
+            } else {
+                fmt.println("Unable to bind multiple values to the root object!")
+                return false
+            }
+        } else {
+            // standard binding, split path 
+            b._field_path = strings.split(b.field_path, "/", allocator = context.temp_allocator)
+        }
+    }
+
+    return SAX_parse_object(parse_context, &root)
 }
 
 SAX_parse_object :: proc(using parse_context: ^SAX_Parse_Context, parent: ^SAX_Field) -> bool {
