@@ -8,6 +8,30 @@ import "core:runtime"
 import "core:reflect"
 import "core:mem"
 
+
+// you can override logging to use whatever logging system you use
+// just assign a new value to this procedure
+Log_Proc :: #type proc(format: string, args: ..any)
+
+// this can be set by the user as the default log proc to use if none is provided in the parse context
+default_log_proc : Log_Proc
+
+// if no log proc is provided in the parse context or set as the default_log_proc...
+log_stub :: proc(format: string, args: ..any) { }
+
+/*
+    TODO: add internal log levels
+    When implementing custom log proc for this library to use, 
+    we will need to map from the internal log levels to the logging system's levels.
+    
+    may add the abilty to override the logging proc in the parse context.
+    
+    In the interface for this library, I don't want to require the user to call an init function, since we already need to pass a parse context when we actually call parse_file()
+    So the parse_file proc should probably be responsible for making sure that things such as the log proc are set validly.
+*/
+
+
+
 whitespace_chars :: " ,\t\r\n\x00"
 reserved_chars   :: "#{}[]\""
 whitespace_and_reserved_chars :: " ,\t\r\n#{}[]\"\x00"
@@ -581,14 +605,18 @@ Serialization_Settings :: struct {
 
 Parse_Flags :: bit_set[Parse_Flag]
 Parse_Flag :: enum {
+    // only applies to arrays
     PARSE_ARRAY_INDEXED,
+    
+    INIT, // will initialize via an initialization proc if one is provided, or else memset to 0
+    SKIP, // will prevent any data bindings from occurring
 }
 
 Parse_Settings :: struct {
-    flags : Parse_Flags,
-    // add type-specific callbacks
+    flags   : Parse_Flags,
 
     parse_proc : proc(^SAX_Parse_Context) -> SAX_Return_Code
+    // init_proc  : proc(rawptr) -> bool // TODO
 }
 
 
@@ -600,6 +628,9 @@ IO_Data_Lookup : map[typeid]IO_Data
 IO_Data :: struct {
     parse     : Parse_Settings,
     serialize : Serialization_Settings,
+
+    // for structs only
+    member_data : map[string]IO_Data,
 }
 
 // Data_Mappings :: struct {
@@ -625,29 +656,4 @@ IO_Data :: struct {
 //   builder       : strings.Builder,
 //   data_bindings : []Data_Binding,
 // }
-
-// serialize_file :: proc()
-
-// serialize_object :: proc(using serialization_context: ^Serialization_Context) {
-//   prep_data_bindings(data_bindings)
-
-//   // direct data bindings
-//   for &b in data_bindings {
-//     // check if _field_path[_field_depth] is a match
-//     if field.name != b._field_path[_field_depth] {
-//       continue
-//     }
-//     b._path_depth += 1;
-
-//     // check if we've matched the entire field address
-//     if len(b._field_path) == b._path_depth {
-//       b._path_depth = -1; // deactivate the binding so that it will be skipped in future checks
-
-//       if !set_field_data_binding(parse_context, &field, b.binding) {
-//         return false
-//       }
-//     }
-//   }
-// }
-
 
