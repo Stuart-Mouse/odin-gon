@@ -39,7 +39,7 @@ SAX_Parse_Context :: struct {
 
 SAX_Return_Code :: enum {
     ERROR = 0,
-    OK    = 1, // TODO: rename to OK
+    OK    = 1,
 
     SKIP_BINDING,
 }
@@ -52,6 +52,15 @@ SAX_Event_Handler :: struct {
     field_read,
     data_binding,
     indirect_data_binding : SAX_Event_Handler_Proc
+}
+
+print_field_address :: proc(field: ^SAX_Field) {
+    f := field
+    for f != nil {
+        fmt.printf("%v/", f.name)
+        f = f.parent
+    }
+    fmt.println()
 }
 
 SAX_parse_file :: proc(using ctxt: ^SAX_Parse_Context) -> bool {
@@ -72,7 +81,7 @@ SAX_parse_file :: proc(using ctxt: ^SAX_Parse_Context) -> bool {
     // TODO: we should probably verify that the path strings actually conform to the standard for gon strings
 
     // split the paths for all data bindings before parsing
-    for &b in data_bindings {
+for &b in data_bindings {
         if b.field_path == "" {
             // an empty path means we are binding to the root of the file
             // we can only have one binding to the root of the file!
@@ -91,7 +100,7 @@ SAX_parse_file :: proc(using ctxt: ^SAX_Parse_Context) -> bool {
     return SAX_parse_object(ctxt, &root)
 }
 
-SAX_parse_object :: proc(using ctxt: ^SAX_Parse_Context, parent: ^SAX_Field) -> bool {
+SAX_parse_object :: proc(using ctxt: ^SAX_Parse_Context, parent: ^SAX_Field) -> (success: bool) {
     next_token_type : Token_Type
     next_token      : string
 
@@ -123,6 +132,8 @@ SAX_parse_object :: proc(using ctxt: ^SAX_Parse_Context, parent: ^SAX_Field) -> 
                     log("GON parse error: Unexpected %v token \"%v\".", next_token_type, next_token)
                     return false
             }
+        } else {
+            field.name = fmt.tprintf("%v[%v]", field.parent.name, field.index)
         }
 
         // read field value and append
@@ -276,6 +287,8 @@ SAX_parse_object :: proc(using ctxt: ^SAX_Parse_Context, parent: ^SAX_Field) -> 
                         found: bool
                         field.io_data, found = parent.io_data.member_data[member.name]
                         
+                        fmt.printf("indirect binding on struct member %v to %v\n", member.name, field.name)
+                        
                         field.data_binding = any {
                             data = mem.ptr_offset(cast(^u8)parent.data_binding.data, member.offset),
                             id   = member.type.id,
@@ -365,21 +378,25 @@ process_data_binding :: proc(using ctxt: ^SAX_Parse_Context, field: ^SAX_Field) 
             case runtime.Type_Info_Array:
                 if tiv.elem.size != 1 {
                     log("Unable to bind field \"%v\" to data of type: %v", field.name, field.data_binding.id)
+                    print_field_address(field)
                     return false
                 }
             case runtime.Type_Info_Dynamic_Array:
                 if tiv.elem.size != 1 {
                     log("Unable to bind field \"%v\" to data of type: %v", field.name, field.data_binding.id)
+                    print_field_address(field)
                     return false
                 }
             case runtime.Type_Info_Slice:
                 if tiv.elem.size != 1 {
                     log("Unable to bind field \"%v\" to data of type: %v", field.name, field.data_binding.id)
+                    print_field_address(field)
                     return false
                 }
                 
             case: 
                 log("Unable to bind field \"%v\" to data of type: %v", field.name, field.data_binding.id)
+                print_field_address(field)
                 return false
         }
         if !set_value_from_string(ctxt, field.data_binding, field.value) {
@@ -557,15 +574,29 @@ array_add_any :: proc(array: any) -> (any, bool) {
 array_add_any_nocheck :: proc(array: ^runtime.Raw_Dynamic_Array, elem_ti: ^runtime.Type_Info) -> any {
     if array.len >= array.cap {
         reserve   := max(2 * array.cap, 8)
-        old_size  := elem_ti.size *  array.cap
-        new_size  := elem_ti.size * (array.cap + reserve) 
+        old_size  := elem_ti.size * array.cap
+        new_size  := elem_ti.size * reserve
         allocator := array.allocator != {} ? array.allocator : context.allocator
         array.data, _ = mem.resize(array.data, old_size, new_size, elem_ti.align, allocator)
-        array.cap = new_size
+        array.cap = reserve
     }
-    array.len += 1
-    return {
+    
+    ret := any {
         data = mem.ptr_offset(cast(^u8) array.data, array.len * elem_ti.size),
         id   = elem_ti.id, 
     }
+    array.len += 1
+    
+    return ret
+}
+
+get_size_with_align :: proc(size, align: int) -> int {
+    if align == 0 do return size
+    
+    whole     := size / align
+    remainder := size / align
+    
+    if remainder != 0 do whole += 1
+    
+    return whole * align
 }
