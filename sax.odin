@@ -8,6 +8,7 @@ import "core:strings"
 import "core:strconv"
 import "core:mem"
 import "core:unicode/utf8"
+import "core:math"
 
 
 SAX_Field :: struct {
@@ -238,16 +239,23 @@ SAX_parse_object :: proc(using ctxt: ^SAX_Parse_Context, parent: ^SAX_Field) -> 
                     field.data_binding = parent.data_binding
 
                 case runtime.Type_Info_Dynamic_Array:
-                    assert(parent.type == .ARRAY) // TODO
-                    field.data_binding = array_add_any(parent.data_binding) or_return
+                    if .PARSE_ARRAY_INDEXED in parent.io_data.parse.flags {
+                        assert(parent.type == .OBJECT) // TODO
+                        field.index = strconv.atoi(field.name)
+                        field.data_binding = array_add_any_at_index(parent.data_binding, field.index)
+                    } else {
+                        assert(parent.type == .ARRAY) // TODO
+                        field.data_binding = array_add_any(parent.data_binding)
+                    }
+                    
+                    if field.data_binding == nil {
+                        return false
+                    }
 
                 case runtime.Type_Info_Array:
-                    assert(parent.type == .ARRAY) // TODO
-                    raw_slice := cast(^runtime.Raw_Slice) parent.data_binding.data
-                    
-                    // TODO: add handling for indexed arrays
-                    // Should we go back to handling all array types in a common block?
-                    // Modify field.index to insert into different location in array
+                    if .PARSE_ARRAY_INDEXED in parent.io_data.parse.flags {
+                        field.index = strconv.atoi(field.name)
+                    }
                     
                     if field.index >= parent_tiv.count {
                         log("Unable to add to array, ran out of space.")
@@ -261,8 +269,12 @@ SAX_parse_object :: proc(using ctxt: ^SAX_Parse_Context, parent: ^SAX_Field) -> 
                     }
 
                 case runtime.Type_Info_Slice:
-                    assert(parent.type == .ARRAY) // TODO
                     raw_slice := cast(^runtime.Raw_Slice) parent.data_binding.data
+                    
+                    if .PARSE_ARRAY_INDEXED in parent.io_data.parse.flags {
+                        field.index = strconv.atoi(field.name)
+                    }
+                    
                     if field.index >= raw_slice.len {
                         log("Unable to add to slice, ran out of space.")
                         return false
@@ -286,8 +298,6 @@ SAX_parse_object :: proc(using ctxt: ^SAX_Parse_Context, parent: ^SAX_Field) -> 
                         // but how to do this well is unclear. Will just leave it up to the user for now.
                         found: bool
                         field.io_data, found = parent.io_data.member_data[member.name]
-                        
-                        fmt.printf("indirect binding on struct member %v to %v\n", member.name, field.name)
                         
                         field.data_binding = any {
                             data = mem.ptr_offset(cast(^u8)parent.data_binding.data, member.offset),
@@ -563,40 +573,106 @@ set_value_from_string :: proc(using ctxt: ^SAX_Parse_Context, value: any, text: 
     return true
 }
 
-array_add_any :: proc(array: any) -> (any, bool) {
+array_add_any :: proc(array: any) -> any {
+    if array.data == nil {
+		return {}
+	}
+    
     ti := type_info_of(array.id)
-    if ti_array, ok := ti.variant.(runtime.Type_Info_Dynamic_Array); ok {
-        return array_add_any_nocheck(auto_cast array.data, ti_array.elem), true
+    ti_array, ok := ti.variant.(runtime.Type_Info_Dynamic_Array)
+    if !ok {
+        return false
     }
-    return {}, false
-}
-
-array_add_any_nocheck :: proc(array: ^runtime.Raw_Dynamic_Array, elem_ti: ^runtime.Type_Info) -> any {
-    if array.len >= array.cap {
-        reserve   := max(2 * array.cap, 8)
-        old_size  := elem_ti.size * array.cap
-        new_size  := elem_ti.size * reserve
-        allocator := array.allocator != {} ? array.allocator : context.allocator
-        array.data, _ = mem.resize(array.data, old_size, new_size, elem_ti.align, allocator)
-        array.cap = reserve
+    
+    a := cast(^runtime.Raw_Dynamic_Array) array.data
+    
+    a.len += 1
+    
+    if a.len >= a.cap {
+        new_cap := max(8, a.cap * 2)
+        if !reserve_any_dynamic_array(array, new_cap) {
+            return {}
+        }
     }
     
     ret := any {
-        data = mem.ptr_offset(cast(^u8) array.data, array.len * elem_ti.size),
-        id   = elem_ti.id, 
+        data = mem.ptr_offset(cast(^u8) array.data, (a.len - 1  )* ti_array.elem.size),
+        id   = ti_array.elem.id, 
     }
-    array.len += 1
-    
     return ret
 }
 
-get_size_with_align :: proc(size, align: int) -> int {
-    if align == 0 do return size
+array_add_any_at_index :: proc(array: any, index: int) -> any {
+    new_cap := math.next_power_of_two(index)
     
-    whole     := size / align
-    remainder := size / align
+    if array.data == nil {
+		return false
+	}
     
-    if remainder != 0 do whole += 1
+    ti := type_info_of(array.id)
+    ti_array, ok := ti.variant.(runtime.Type_Info_Dynamic_Array)
+    if !ok {
+        return false
+    }
     
-    return whole * align
+    if !reserve_any_dynamic_array(array, new_cap) {
+        return {}
+    }
+    
+    ret := any {
+        data = mem.ptr_offset(cast(^u8) array.data, index * ti_array.elem.size),
+        id   = ti_array.elem.id, 
+    }
+    return ret
 }
+
+reserve_any_dynamic_array :: proc(array: any, capacity: int) -> bool {
+    if array.data == nil {
+		return false
+	}
+    
+    ti := type_info_of(array.id)
+    ti_array, ok := ti.variant.(runtime.Type_Info_Dynamic_Array)
+    if !ok {
+        return false
+    }
+    
+	a := cast(^runtime.Raw_Dynamic_Array) array.data 
+
+	if capacity <= a.cap {
+		return true
+	}
+
+	if a.allocator.procedure == nil {
+		a.allocator = context.allocator
+	}
+	assert(a.allocator.procedure != nil)
+
+	old_size  := a.cap    * ti_array.elem.size
+	new_size  := capacity * ti_array.elem.size
+	allocator := a.allocator
+
+	new_data, err := mem.resize(a.data, old_size, new_size, ti_array.elem.align, allocator)
+	if err != nil {
+		return false
+	}
+	if new_data == nil && new_size > 0 {
+		return false
+	}
+
+	a.data = new_data
+	a.cap  = capacity
+	return true
+}
+
+
+// get_size_with_align :: proc(size, align: int) -> int {
+//     if align == 0 do return size
+    
+//     whole     := size / align
+//     remainder := size / align
+    
+//     if remainder != 0 do whole += 1
+    
+//     return whole * align
+// }

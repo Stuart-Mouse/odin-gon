@@ -198,17 +198,25 @@ serialize_any :: proc(
   sb       : ^strings.Builder, 
   name     : string, 
   value    : any, 
-  indent   : int = 0, 
+  indent   : int     = 0, 
+  flags    : Serialization_Flags = {},
 ) {
     using runtime
+    flags := flags
 
     if value.data == nil do return
-    // if skip_nil && all_bytes_are_zero(value) do return // skip serializing zero'd data
+    
+    if .SKIP_IF_EMPTY in flags && all_bytes_are_zero(value) do return // skip serializing zero'd data
 
     ti := type_info_base(type_info_of(value.id))
     // if ti_named, ok := ti.variant.(Type_Info_Named); ok {
     //     ti = ti_named.base
     // }
+    
+    type_io_data, found := IO_Data_Lookup[value.id]
+    if found {
+        flags |= type_io_data.serialize.flags
+    }
 
     #partial switch tiv in ti.variant {
         case Type_Info_Struct: 
@@ -229,7 +237,8 @@ serialize_any :: proc(
                     data = mem.ptr_offset(cast(^byte)value.data, offset),
                     id   = type.id,
                 }
-                serialize_any(sb, name, member_any, indent + 2);
+                elem_flags := flags
+                serialize_any(sb, name, member_any, indent + 2, elem_flags);
             }
             for i in 0..<indent do strings.write_string(sb, " ");
             strings.write_string(sb, "}\n");
@@ -263,9 +272,10 @@ serialize_any :: proc(
             }
     
             // skip serializing if all bytes of array data are 0
-            // if skip_nil && all_bytes_are_zero(data, elem_count * elem_ti.size) {
-            //   return
-            // }
+            if .SKIP_IF_EMPTY in flags && 
+               all_bytes_are_zero(data, elem_count * elem_ti.size) {
+                return
+            }
     
             for i in 0..<indent do strings.write_string(sb, " ");
             if name != "" {
@@ -286,6 +296,33 @@ serialize_any :: proc(
                 )
                 strings.write_byte(sb, '\n');
                 return 
+            }
+            
+            // serialize as indexed array
+            // TODO: refactor to reduce code duplication with standard case, parameterize differences
+            if .SERIALIZE_ARRAY_INDEXED in flags {
+                strings.write_string(sb, "{")
+                
+                delim: string = "\n"
+                strings.write_string(sb, delim)
+                
+                for i in 0..<elem_count {
+                    item := any {
+                        id   = elem_ti.id,
+                        data = mem.ptr_offset(cast(^byte)data, elem_ti.size * i),
+                    }
+                    elem_flags := flags
+                    elem_flags |= { .SKIP_IF_EMPTY }
+                    serialize_any(sb, fmt.tprint(i), item, indent + 2, elem_flags)
+                }
+        
+                // we only need to indent the closing bracket if the delimeter was newline
+                if delim == "\n" {
+                    for i in 0..<indent do strings.write_string(sb, " ")
+                }
+                strings.write_string(sb, "}\n")
+                
+                return
             }
     
             // otherwise, serialize as a standard array
@@ -309,7 +346,8 @@ serialize_any :: proc(
                     id   = elem_ti.id,
                     data = mem.ptr_offset(cast(^byte)data, elem_ti.size * i),
                 }
-                serialize_any(sb, "", item, indent + 2)
+                elem_flags := flags
+                serialize_any(sb, "", item, indent + 2, elem_flags)
             }
     
             // we only need to indent the closing bracket if the delimeter was newline
@@ -425,7 +463,8 @@ serialize_any :: proc(
                             key   := runtime.map_cell_index_dynamic(ks, tiv.map_info.ks, bucket_index)
                             value := runtime.map_cell_index_dynamic(vs, tiv.map_info.vs, bucket_index)
                   
-                            serialize_any(sb, (cast(^string)key)^, any{rawptr(value), tiv.value.id}, indent + 2)
+                            elem_flags := flags
+                            serialize_any(sb, (cast(^string)key)^, any{rawptr(value), tiv.value.id}, indent + 2, elem_flags)
                         }
                     }
                                 
@@ -572,6 +611,7 @@ Serialization_Flag :: enum {
   
     // the struct member or data type will be skipped during serialization if 0-valued
     // arrays will also be skipped if all elements are 0-valued
+    // elements within indexed arrays will also be skipped if 0-valued
     SKIP_IF_EMPTY,
   
     // when applied to a struct member, that member will always be serialized, even if 0-valued 
@@ -594,9 +634,9 @@ Serialization_Flag :: enum {
 }
 
 Serialization_Settings :: struct {
-    flags            : Serialization_Flag,
+    flags            : Serialization_Flags,
     one_line         : bool,
-    member_delimiter : []string, // can have a unique delimiter between each field
+    // member_delimiter : []string, // can have a unique delimiter between each field
   
     // If you want to use a completely custom serialization procedure for a given data type.
     // I would recommend against using this in general, unless you need to implement serialization for some complex data structure.
