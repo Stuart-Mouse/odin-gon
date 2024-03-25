@@ -573,6 +573,34 @@ set_value_from_string :: proc(using ctxt: ^SAX_Parse_Context, value: any, text: 
     return true
 }
 
+// array_add_any :: proc(array: any) -> any {
+//     ti := type_info_of(array.id)
+//     if ti_array, ok := ti.variant.(runtime.Type_Info_Dynamic_Array); ok {
+//         return array_add_any_nocheck(auto_cast array.data, ti_array.elem)
+//     }
+//     return {}
+// }
+
+// array_add_any_nocheck :: proc(array: ^runtime.Raw_Dynamic_Array, elem_ti: ^runtime.Type_Info) -> any {
+//     if array.len >= array.cap {
+//         reserve   := max(2 * array.cap, 8)
+//         old_size  := elem_ti.size * array.cap
+//         new_size  := elem_ti.size * reserve
+//         allocator := array.allocator != {} ? array.allocator : context.allocator
+//         array.data, _ = mem.resize(array.data, old_size, new_size, elem_ti.align, allocator)
+//         array.cap = reserve
+//     }
+    
+//     ret := any {
+//         data = mem.ptr_offset(cast(^u8) array.data, array.len * elem_ti.size),
+//         id   = elem_ti.id, 
+//     }
+//     array.len += 1
+    
+//     return ret
+// }
+
+
 array_add_any :: proc(array: any) -> any {
     if array.data == nil {
 		return {}
@@ -596,9 +624,10 @@ array_add_any :: proc(array: any) -> any {
     }
     
     ret := any {
-        data = mem.ptr_offset(cast(^u8) array.data, (a.len - 1  )* ti_array.elem.size),
+        data = mem.ptr_offset(cast(^u8) a.data, (a.len - 1) * ti_array.elem.size),
         id   = ti_array.elem.id, 
     }
+    
     return ret
 }
 
@@ -619,8 +648,10 @@ array_add_any_at_index :: proc(array: any, index: int) -> any {
         return {}
     }
     
+    a := cast(^runtime.Raw_Dynamic_Array) array.data
+    
     ret := any {
-        data = mem.ptr_offset(cast(^u8) array.data, index * ti_array.elem.size),
+        data = mem.ptr_offset(cast(^u8) a.data, index * ti_array.elem.size),
         id   = ti_array.elem.id, 
     }
     return ret
