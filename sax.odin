@@ -82,7 +82,7 @@ SAX_parse_file :: proc(using ctxt: ^SAX_Parse_Context) -> bool {
     // TODO: we should probably verify that the path strings actually conform to the standard for gon strings
 
     // split the paths for all data bindings before parsing
-for &b in data_bindings {
+    for &b in data_bindings {
         if b.field_path == "" {
             // an empty path means we are binding to the root of the file
             // we can only have one binding to the root of the file!
@@ -257,7 +257,7 @@ SAX_parse_object :: proc(using ctxt: ^SAX_Parse_Context, parent: ^SAX_Field) -> 
                         elem_ti := runtime.type_info_base(parent_tiv.elem)
                         field.data_binding = any {
                             data = mem.ptr_offset(cast(^u8)parent.data_binding.data, elem_ti.size * field.index),
-                            id   = parent_tiv.elem.id, // important not to use elem_ti, since that loses the type name (this is stupid, I guess Odin has this Type_Info_Named strucutre because of the desire to deduplicate the base types for distinctly typed types, but its still a headache to deal with.)
+                            id   = parent_tiv.elem.id,
                         }
                     }
 
@@ -275,7 +275,7 @@ SAX_parse_object :: proc(using ctxt: ^SAX_Parse_Context, parent: ^SAX_Field) -> 
                         elem_ti := runtime.type_info_base(parent_tiv.elem)
                         field.data_binding = any {
                             data = mem.ptr_offset(cast(^u8)raw_slice.data, elem_ti.size * field.index),
-                            id   = elem_ti.id,
+                            id   = parent_tiv.elem.id,
                         }
                     }
 
@@ -371,7 +371,7 @@ process_data_binding :: proc(using ctxt: ^SAX_Parse_Context, field: ^SAX_Field) 
     // but it seems appropriate that these parse procs cut in at the same point as the data bind event handlers
     // Should this be moved into the .FIELD case? prevent user from needing to check the field type, but also prevents custom processing for gon objects/arrays
     if field.io_data.parse.parse_proc != nil {
-        return field.io_data.parse.parse_proc(ctxt, field)
+        return field.io_data.parse.parse_proc(ctxt, field) == .OK
     }
     
     // NOTE: should we move this to before handling data binding event since the binding will not actually occur?
@@ -631,34 +631,6 @@ set_value_from_string :: proc(using ctxt: ^SAX_Parse_Context, value: any, text: 
     
     return true
 }
-
-// array_add_any :: proc(array: any) -> any {
-//     ti := type_info_of(array.id)
-//     if ti_array, ok := ti.variant.(runtime.Type_Info_Dynamic_Array); ok {
-//         return array_add_any_nocheck(auto_cast array.data, ti_array.elem)
-//     }
-//     return {}
-// }
-
-// array_add_any_nocheck :: proc(array: ^runtime.Raw_Dynamic_Array, elem_ti: ^runtime.Type_Info) -> any {
-//     if array.len >= array.cap {
-//         reserve   := max(2 * array.cap, 8)
-//         old_size  := elem_ti.size * array.cap
-//         new_size  := elem_ti.size * reserve
-//         allocator := array.allocator != {} ? array.allocator : context.allocator
-//         array.data, _ = mem.resize(array.data, old_size, new_size, elem_ti.align, allocator)
-//         array.cap = reserve
-//     }
-    
-//     ret := any {
-//         data = mem.ptr_offset(cast(^u8) array.data, array.len * elem_ti.size),
-//         id   = elem_ti.id, 
-//     }
-//     array.len += 1
-    
-//     return ret
-// }
-
 
 array_add_any :: proc(array: any) -> any {
     if array.data == nil {

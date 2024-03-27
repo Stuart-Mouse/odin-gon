@@ -271,19 +271,19 @@ serialize_any :: proc(
                 case Type_Info_Array:
                     data       = value.data
                     elem_count = tiv.count
-                    elem_ti    = type_info_base(tiv.elem)
+                    elem_ti    = tiv.elem
         
                 case Type_Info_Slice:
                     raw_slice := cast(^runtime.Raw_Slice) value.data
                     data       = raw_slice.data
                     elem_count = raw_slice.len
-                    elem_ti    = type_info_base(tiv.elem)
+                    elem_ti    = tiv.elem
       
                 case Type_Info_Dynamic_Array:
                     raw_dynamic_array := cast(^runtime.Raw_Dynamic_Array) value.data
                     data       = raw_dynamic_array.data
                     elem_count = raw_dynamic_array.len
-                    elem_ti    = type_info_base(tiv.elem)
+                    elem_ti    = tiv.elem
                     if elem_count == 0 do return // skip serializing empty dynamic arrays
             }
     
