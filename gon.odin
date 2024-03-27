@@ -11,13 +11,13 @@ import "core:mem"
 
 // you can override logging to use whatever logging system you use
 // just assign a new value to this procedure
-Log_Proc :: #type proc(format: string, args: ..any)
+Log_Proc :: #type proc(format: string, args: ..any, loc := #caller_location)
 
 // this can be set by the user as the default log proc to use if none is provided in the parse context
 default_log_proc : Log_Proc
 
 // if no log proc is provided in the parse context or set as the default_log_proc...
-log_stub :: proc(format: string, args: ..any) { }
+log_stub :: proc(format: string, args: ..any, loc := #caller_location) { }
 
 /*
     TODO: add internal log levels
@@ -29,7 +29,6 @@ log_stub :: proc(format: string, args: ..any) { }
     In the interface for this library, I don't want to require the user to call an init function, since we already need to pass a parse context when we actually call parse_file()
     So the parse_file proc should probably be responsible for making sure that things such as the log proc are set validly.
 */
-
 
 
 whitespace_chars :: " ,\t\r\n\x00"
@@ -198,25 +197,26 @@ serialize_any :: proc(
   sb       : ^strings.Builder, 
   name     : string, 
   value    : any, 
-  indent   : int     = 0, 
+  indent   : int    = 0, 
+  delim    : string = "",
   flags    : Serialization_Flags = {},
 ) {
     using runtime
-    flags := flags
 
     if value.data == nil do return
-    
-    if .SKIP_IF_EMPTY in flags && all_bytes_are_zero(value) do return // skip serializing zero'd data
 
     ti := type_info_base(type_info_of(value.id))
     // if ti_named, ok := ti.variant.(Type_Info_Named); ok {
     //     ti = ti_named.base
     // }
     
+    flags := flags
     type_io_data, found := IO_Data_Lookup[value.id]
     if found {
         flags |= type_io_data.serialize.flags
     }
+    
+    if .SKIP_IF_EMPTY in flags && all_bytes_are_zero(value) do return // skip serializing zero'd data
 
     #partial switch tiv in ti.variant {
         case Type_Info_Struct: 
@@ -227,21 +227,37 @@ serialize_any :: proc(
                 )
                 strings.write_string(sb, " ");
             }
-            strings.write_string(sb, "{\n");
+            
+            as_array    := .AS_ARRAY    in flags
+            on_one_line := .ON_ONE_LINE in flags
+            
+            strings.write_byte(sb, as_array    ? '[' : '{' )
+            strings.write_byte(sb, on_one_line ? ' ' : '\n')
+            
             member_count := len(tiv.names)
             for i in 0..<member_count {
                 type   := tiv.types  [i]
                 name   := tiv.names  [i]
                 offset := tiv.offsets[i]
+                
                 member_any := any {
                     data = mem.ptr_offset(cast(^byte)value.data, offset),
                     id   = type.id,
                 }
-                elem_flags := flags
-                serialize_any(sb, name, member_any, indent + 2, elem_flags);
+                
+                // member_flags  := flags
+                member_indent := on_one_line ? 0 : indent + 2
+                member_name   := as_array    ? "" : name
+                member_delim  := on_one_line ? " " : "\n"  // TODO: type_io_data.serialize.member_delim
+                
+                serialize_any(sb, member_name, member_any, member_indent, member_delim, {});
             }
-            for i in 0..<indent do strings.write_string(sb, " ");
-            strings.write_string(sb, "}\n");
+            
+            if !on_one_line do for i in 0..<indent do strings.write_string(sb, " ");
+            
+            strings.write_byte(sb, as_array ? ']' : '}' )
+            strings.write_byte(sb, '\n')
+            
             return
   
         case Type_Info_Array, Type_Info_Slice, Type_Info_Dynamic_Array: 
@@ -311,9 +327,9 @@ serialize_any :: proc(
                         id   = elem_ti.id,
                         data = mem.ptr_offset(cast(^byte)data, elem_ti.size * i),
                     }
-                    elem_flags := flags
-                    elem_flags |= { .SKIP_IF_EMPTY }
-                    serialize_any(sb, fmt.tprint(i), item, indent + 2, elem_flags)
+                    // elem_flags := flags
+                    // elem_flags |= { .SKIP_IF_EMPTY }
+                    serialize_any(sb, fmt.tprint(i), item, indent = indent + 2, flags = { .SKIP_IF_EMPTY }) // temporary
                 }
         
                 // we only need to indent the closing bracket if the delimeter was newline
@@ -330,38 +346,38 @@ serialize_any :: proc(
     
             // use a different spacing delimiter between fields vs objects/arrays  
             // TODO: probably pass this is a param to sub-field instead of determining delim based on field type alone
-            delim: string = " "
+            
+            elem_delim: string = " "
             #partial switch elem_tiv in elem_ti.variant {
                 case Type_Info_Array, 
                      Type_Info_Slice, 
                      Type_Info_Dynamic_Array, 
                      Type_Info_Bit_Set, 
                      Type_Info_Struct:
-                    delim = "\n"
+                    elem_delim = "\n"
             }
-            strings.write_string(sb, delim)
+            strings.write_string(sb, elem_delim)
     
             for i in 0..<elem_count {
-                item := any {
+                elem_any := any {
                     id   = elem_ti.id,
                     data = mem.ptr_offset(cast(^byte)data, elem_ti.size * i),
                 }
                 elem_flags := flags
-                serialize_any(sb, "", item, indent + 2, elem_flags)
+                serialize_any(sb, "", elem_any, indent + 2, elem_delim, elem_flags)
             }
     
             // we only need to indent the closing bracket if the delimeter was newline
-            if delim == "\n" {
+            if elem_delim == "\n" {
                 for i in 0..<indent do strings.write_string(sb, " ")
             }
-            strings.write_string(sb, "]\n")
+            strings.write_string(sb, "]")
+            
+            delim := delim != "" ? delim : "\n" 
+            strings.write_string(sb, delim);
     
             return
-    
-        case Type_Info_Integer: 
-        case Type_Info_Float: 
-        case Type_Info_Enum: 
-        case Type_Info_Boolean: 
+        
         case Type_Info_String: 
             str: string
             if tiv.is_cstring {
@@ -369,22 +385,22 @@ serialize_any :: proc(
             } else {
                 str = (cast(^string)value.data)^
             }
+            
+            for i in 0..<indent do strings.write_string(sb, " ")
             if name != "" {
-                for i in 0..<indent do strings.write_string(sb, " ");
                 strings.write_string(sb, 
                     to_conformant_string(name, allocator = context.temp_allocator),
                 )
-                strings.write_byte(sb, ' ');
-                strings.write_string(sb, 
-                    to_conformant_string(str, force_quotes = true, allocator = context.temp_allocator),
-                )
-                strings.write_byte(sb, '\n');
-            } else {
-                strings.write_string(sb, 
-                    to_conformant_string(str, force_quotes = true, allocator = context.temp_allocator),
-                )
-                strings.write_byte(sb, ' ');
+                strings.write_byte(sb, ' ')
             }
+            
+            strings.write_string(sb, 
+                to_conformant_string(str, force_quotes = true, allocator = context.temp_allocator),
+            )
+            
+            delim := delim != "" ? delim : "\n" 
+            strings.write_string(sb, delim);
+            
             return
   
         case Type_Info_Bit_Set: 
@@ -432,9 +448,12 @@ serialize_any :: proc(
                     fmt.println("Unsupported bit set element type", elem_ti)
                     return
             }
-            strings.write_string(sb, "]\n")
+            strings.write_string(sb, "]")
+            
+            delim := delim != "" ? delim : "\n" 
+            strings.write_string(sb, delim);
+            
             return
-    
   
         case Type_Info_Map:
             raw_map := transmute(^Raw_Map) value.data
@@ -448,7 +467,7 @@ serialize_any :: proc(
                         strings.write_string(sb, " ");
                     }
                     
-                    strings.write_string(sb, "{\n")         
+                    strings.write_string(sb, "{\n")
                     m := (^mem.Raw_Map)(value.data)
                     
                     if m != nil {
@@ -464,34 +483,43 @@ serialize_any :: proc(
                             value := runtime.map_cell_index_dynamic(vs, tiv.map_info.vs, bucket_index)
                   
                             elem_flags := flags
-                            serialize_any(sb, (cast(^string)key)^, any{rawptr(value), tiv.value.id}, indent + 2, elem_flags)
+                            serialize_any(sb, (cast(^string)key)^, any{rawptr(value), tiv.value.id}, indent = indent + 2, flags = elem_flags)
                         }
                     }
                                 
                     for i in 0..<indent do strings.write_string(sb, " ")
-                    strings.write_string(sb, "}\n")
+                    strings.write_string(sb, "}")
+                    
+                    delim := delim != "" ? delim : "\n" 
+                    strings.write_string(sb, delim);
+                    
                     return
                           
                 case: 
                     fmt.printf("Unable to serialize type: %v\nCurrently, only maps with string keys are supported.", ti)
                     return
             }
-        case:
-            fmt.println("Unable to serialize type", ti)
+            
+        case Type_Info_Integer, Type_Info_Float, Type_Info_Enum, Type_Info_Boolean: 
+            for i in 0..<indent do strings.write_string(sb, " ");
+            
+            if name != "" {
+                strings.write_string(sb, 
+                    to_conformant_string(name, allocator = context.temp_allocator),
+                )
+                strings.write_string(sb, " ");
+            }
+            
+            fmt.sbprintf(sb, "%v", value);
+            
+            delim := delim != "" ? delim : "\n" 
+            strings.write_string(sb, delim);
+            
             return
     }    
-
-    if name != "" {
-        for i in 0..<indent do strings.write_string(sb, " ");
-        strings.write_string(sb, 
-            to_conformant_string(name, allocator = context.temp_allocator),
-        )
-        strings.write_string(sb, " ");
-        fmt.sbprintf(sb, "%v\n", value);
-    }
-    else {
-        fmt.sbprintf(sb, "%v ", value);
-    }
+    
+    fmt.println("Unable to serialize type", ti)
+    return
 }
 
 // also works for enum and boolean types, for the sake of convenience
@@ -619,11 +647,14 @@ Serialization_Flag :: enum {
   
     // serializes a struct as though it were an array, binding to fields by index rather than by name
     // this should only be used if the structure is stable, as changing the order of fields would cause parsing issues across program versions  
-    SERIALIZE_AS_ARRAY,
+    AS_ARRAY,
   
     // serializes an array of structs as a GON object, using the @gon_name struct member as the name for each object
     // this is primarily used just to make some files more human readable/editable
-    SERIALIZE_AS_OBJECT,
+    AS_OBJECT,
+    
+    // 
+    ON_ONE_LINE,
   
     // to be used when some data type or struct member represents sensitive data
     // will only be serialized when the corresponding flag is present in the serialization settings
@@ -634,13 +665,12 @@ Serialization_Flag :: enum {
 }
 
 Serialization_Settings :: struct {
-    flags            : Serialization_Flags,
-    one_line         : bool,
-    // member_delimiter : []string, // can have a unique delimiter between each field
+    flags          : Serialization_Flags,
+    member_delim   : string,
   
     // If you want to use a completely custom serialization procedure for a given data type.
     // I would recommend against using this in general, unless you need to implement serialization for some complex data structure.
-    serialize_proc   : proc(^strings.Builder, any) -> bool,
+    serialize_proc : proc(^strings.Builder, any) -> bool,
 }
 
 Parse_Flags :: bit_set[Parse_Flag]
@@ -653,9 +683,9 @@ Parse_Flag :: enum {
 }
 
 Parse_Settings :: struct {
-    flags   : Parse_Flags,
+    flags      : Parse_Flags,
 
-    parse_proc : proc(^SAX_Parse_Context) -> SAX_Return_Code
+    parse_proc : proc(^SAX_Parse_Context, ^SAX_Field) -> SAX_Return_Code
     // init_proc  : proc(rawptr) -> bool // TODO
 }
 
@@ -666,11 +696,21 @@ Parse_Settings :: struct {
 IO_Data_Lookup : map[typeid]IO_Data
 
 IO_Data :: struct {
-    parse     : Parse_Settings,
-    serialize : Serialization_Settings,
+    parse       : Parse_Settings,
+    serialize   : Serialization_Settings,
 
     // for structs only
+    name_member : string,
     member_data : map[string]IO_Data,
+}
+
+get_io_data :: proc(type: typeid) -> (^IO_Data, bool) {
+    io_data, found := &IO_Data_Lookup[type]
+    return io_data, found
+}
+
+register_io_data :: proc(type: typeid, io_data: IO_Data) {
+    IO_Data_Lookup[type] = io_data
 }
 
 // Data_Mappings :: struct {

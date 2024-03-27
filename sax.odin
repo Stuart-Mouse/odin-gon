@@ -190,13 +190,6 @@ SAX_parse_object :: proc(using ctxt: ^SAX_Parse_Context, parent: ^SAX_Field) -> 
             }
         }
         
-        if field.data_binding != nil {
-            type_io_data, found := IO_Data_Lookup[field.data_binding.id]
-            if found {
-                field.io_data = type_io_data
-            }
-        }
-        
         // Processing for indirect data bindings is still very language-specific.
         // If we create version of this parser for other languages, this should probably be factored into a separate procedure so that it is more apparent that this is not language agnostic like the rest of the procedure.
         // check_for_indirect_bindings() could basically be a SAX_Event_Handler_Proc
@@ -264,7 +257,7 @@ SAX_parse_object :: proc(using ctxt: ^SAX_Parse_Context, parent: ^SAX_Field) -> 
                         elem_ti := runtime.type_info_base(parent_tiv.elem)
                         field.data_binding = any {
                             data = mem.ptr_offset(cast(^u8)parent.data_binding.data, elem_ti.size * field.index),
-                            id   = elem_ti.id,
+                            id   = parent_tiv.elem.id, // important not to use elem_ti, since that loses the type name (this is stupid, I guess Odin has this Type_Info_Named strucutre because of the desire to deduplicate the base types for distinctly typed types, but its still a headache to deal with.)
                         }
                     }
 
@@ -292,6 +285,8 @@ SAX_parse_object :: proc(using ctxt: ^SAX_Parse_Context, parent: ^SAX_Field) -> 
                         case .ARRAY : member = reflect.struct_field_at     (parent_ti.id, field.index)
                         case .OBJECT: member = reflect.struct_field_by_name(parent_ti.id, field.name ) 
                     }
+                    // NOTE: should we check that member is not name member? 
+                    // (No, because name member is only used when struct is within an array.)
                     if member != {} {
                         // TODO: probably need to implement merge proc for io_data struct. 
                         // We may want to automatically merge the type io data with the member io data, 
@@ -310,6 +305,11 @@ SAX_parse_object :: proc(using ctxt: ^SAX_Parse_Context, parent: ^SAX_Field) -> 
         // NOTE: Factoring this out here may turn out to improve performance if it gets inlined, 
         //       so perhaps that is another reason to keep it this way going forward.
         if field.data_binding != nil {
+            type_io_data, found := IO_Data_Lookup[field.data_binding.id]
+            if found {
+                field.io_data = type_io_data
+            }
+            
             if !process_data_binding(ctxt, &field) {
                 return false
             }
@@ -366,6 +366,14 @@ process_data_binding :: proc(using ctxt: ^SAX_Parse_Context, field: ^SAX_Field) 
         }
     }
     
+    // not sure if this is actually the optimal place for this
+    // depends on how much power we want to give to io_data parse procs at this location
+    // but it seems appropriate that these parse procs cut in at the same point as the data bind event handlers
+    // Should this be moved into the .FIELD case? prevent user from needing to check the field type, but also prevents custom processing for gon objects/arrays
+    if field.io_data.parse.parse_proc != nil {
+        return field.io_data.parse.parse_proc(ctxt, field)
+    }
+    
     // NOTE: should we move this to before handling data binding event since the binding will not actually occur?
     if .SKIP in field.io_data.parse.flags {
         field.data_binding = {}
@@ -418,13 +426,62 @@ process_data_binding :: proc(using ctxt: ^SAX_Parse_Context, field: ^SAX_Field) 
             case runtime.Type_Info_Array:
             case runtime.Type_Info_Dynamic_Array:
             case runtime.Type_Info_Slice:
+                // 
+            
             case runtime.Type_Info_Bit_Set:
+                // assert(field.type) == .ARRAY
             case runtime.Type_Info_Map:
-                // no op
+                // assert(field.type) == .OBJECT
+            
             case runtime.Type_Info_Struct:
                 if .INIT in field.io_data.parse.flags {
                     mem.set(field.data_binding.data, 0, binding_ti.size)
                 }
+                // if a struct is inside an object, then assign the gon object name to the struct name member
+                L_Get_Name_Member: {
+                    if field.parent.type != .OBJECT {
+                        break L_Get_Name_Member
+                    }
+                    
+                    // TODO: this check should go elsewhere, probably up to the array cases above.
+                    // if .PARSE_AS_OBJECT not_in field.parent.io_data.parse.flags {
+                    //     break L_Get_Name_Member
+                    // }
+                    
+                    // Currently, field.io_data only gets set right before calling into this procedure, 
+                    // which means that this will necessarily be the same data as the io_data for the type specified in IO_Data_Lookup,
+                    // UNLESS the user changed the io data in the data bind callback.
+                    // This is probably something that we want to allow though, since if the user messes things up on their own, that's on them and I don't care so much.
+                    
+                    // type_io_data, found := IO_Data_Lookup[field.data_binding.id]
+                    // if !found {
+                    //     log("Unable to parse named struct array, element type is '%v', but this struct type does not specify any IO data.", field.data_binding.id)
+                    //     return false
+                    // }
+                    
+                    if field.io_data.name_member == "" {
+                        // Maybe we should have some kind of error here if parent is internally an array or map type?
+                        // Doesn't really matter for an array, though it would be weird to have named objects in an array only for those names to be discarded.
+                        // Especially for map, since we presumably need someone to take ownership of the string used for the key?
+                        // log("Unable to parse named struct, element type is '%v', but this struct type does not specify a name member in its IO data.", field.data_binding.id)
+                        break L_Get_Name_Member
+                    }
+                    
+                    member := reflect.struct_field_by_name(field.data_binding.id, field.io_data.name_member)
+                    if member == {} {
+                        log("Unable to parse named struct, the type '%v' specifies an invalid name member '%v' in its IO data.", field.data_binding.id, field.io_data.name_member)
+                        return false
+                    }
+                    
+                    member_any := any {
+                        data = mem.ptr_offset(cast(^u8)field.data_binding.data, member.offset),
+                        id   = member.type.id,
+                    }
+                    if !set_value_from_string(ctxt, member_any, field.name) {
+                        return false
+                    }
+                }
+                
             case:
                 log("Unable to bind object or array to data of type: %v", field.data_binding.id)
                 return false
@@ -437,6 +494,8 @@ process_data_binding :: proc(using ctxt: ^SAX_Parse_Context, field: ^SAX_Field) 
 /* 
     This single procedure is essentially our data interface layer.
     Implementation is language-specific.
+    
+    TODO: this doesn't need to be passed the parse context, and it probably shouldn't be.
 */
 set_value_from_string :: proc(using ctxt: ^SAX_Parse_Context, value: any, text: string) -> bool {
     using runtime
