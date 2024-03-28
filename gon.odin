@@ -167,6 +167,8 @@ is_escaped_char :: proc(char: u8) -> bool {
 }
 
 to_conformant_string :: proc(s: string, force_quotes := false, allocator := context.allocator) -> string {
+    if s == "" do return strings.clone("\"\"", allocator)
+
     sb := strings.builder_make(allocator)
     defer strings.builder_destroy(&sb)
   
@@ -206,17 +208,34 @@ serialize_any :: proc(
     if value.data == nil do return
 
     ti := type_info_base(type_info_of(value.id))
-    // if ti_named, ok := ti.variant.(Type_Info_Named); ok {
-    //     ti = ti_named.base
-    // }
     
     flags := flags
-    type_io_data, found := IO_Data_Lookup[value.id]
-    if found {
-        flags |= type_io_data.serialize.flags
-    }
+    type_io_data, _ := IO_Data_Lookup[value.id] // don't currently need to check if actually found. This is likely to change
+    
+    flags |= type_io_data.serialize.flags
     
     if .SKIP_IF_EMPTY in flags && all_bytes_are_zero(value) do return // skip serializing zero'd data
+    
+    if type_io_data.serialize.to_string_proc != nil {
+        for i in 0..<indent do strings.write_string(sb, " ")
+
+        str, ok := type_io_data.serialize.to_string_proc(value)
+        if !ok do return
+
+        if name != "" {
+            strings.write_string(sb, 
+                to_conformant_string(name, allocator = context.temp_allocator),
+            )
+            strings.write_string(sb, " ");
+        }
+              
+        fmt.sbprintf(sb, "%v", to_conformant_string(str))
+        
+        delim := delim != "" ? delim : "\n" 
+        strings.write_string(sb, delim)
+        
+        return
+    }
 
     #partial switch tiv in ti.variant {
         case Type_Info_Struct: 
@@ -234,7 +253,9 @@ serialize_any :: proc(
             strings.write_byte(sb, as_array    ? '[' : '{' )
             strings.write_byte(sb, on_one_line ? ' ' : '\n')
             
-            member_count := len(tiv.names)
+            member_count  := len(tiv.names)
+            member_indent := on_one_line ? 0 : indent + 2
+            
             for i in 0..<member_count {
                 type   := tiv.types  [i]
                 name   := tiv.names  [i]
@@ -245,18 +266,36 @@ serialize_any :: proc(
                     id   = type.id,
                 }
                 
-                // member_flags  := flags
-                member_indent := on_one_line ? 0 : indent + 2
-                member_name   := as_array    ? "" : name
-                member_delim  := on_one_line ? " " : "\n"  // TODO: type_io_data.serialize.member_delim
+                // We have to figure out the delim on every frame so that we don't write
+                //   a comma after the last element when fields are all on one line.
+                member_delim := type_io_data.serialize.member_delim
+                if member_delim == "" {
+                    // I apologize for the nested ternary
+                    member_delim = on_one_line ? ((i == member_count-1) ? " " : ", ") : "\n"
+                }
                 
-                serialize_any(sb, member_name, member_any, member_indent, member_delim, {});
+                member_flags: Serialization_Flags
+                if .SKIP_ELEMS_IF_EMPTY in flags {
+                    member_flags |= { .SKIP_IF_EMPTY }
+                }
+                
+                member_name := as_array ? "" : name
+                
+                serialize_any(sb, 
+                    name   = member_name, 
+                    value  = member_any, 
+                    indent = member_indent, 
+                    delim  = member_delim, 
+                    flags  = member_flags,
+                )
             }
             
             if !on_one_line do for i in 0..<indent do strings.write_string(sb, " ");
             
             strings.write_byte(sb, as_array ? ']' : '}' )
-            strings.write_byte(sb, '\n')
+            
+            delim := delim != "" ? delim : "\n" 
+            strings.write_string(sb, delim);
             
             return
   
@@ -266,7 +305,6 @@ serialize_any :: proc(
             elem_ti    : ^Type_Info
             
             // disambiguate array/slice/dynamic
-            // TODO: should probably just get all types as a raw slice to simplify
             #partial switch tiv in tiv {
                 case Type_Info_Array:
                     data       = value.data
@@ -314,68 +352,71 @@ serialize_any :: proc(
                 return 
             }
             
-            // serialize as indexed array
-            // TODO: refactor to reduce code duplication with standard case, parameterize differences
-            if .SERIALIZE_ARRAY_INDEXED in flags {
-                strings.write_string(sb, "{")
-                
-                delim: string = "\n"
-                strings.write_string(sb, delim)
-                
-                for i in 0..<elem_count {
-                    item := any {
-                        id   = elem_ti.id,
-                        data = mem.ptr_offset(cast(^byte)data, elem_ti.size * i),
-                    }
-                    // elem_flags := flags
-                    // elem_flags |= { .SKIP_IF_EMPTY }
-                    serialize_any(sb, fmt.tprint(i), item, indent = indent + 2, flags = { .SKIP_IF_EMPTY }) // temporary
-                }
-        
-                // we only need to indent the closing bracket if the delimeter was newline
-                if delim == "\n" {
-                    for i in 0..<indent do strings.write_string(sb, " ")
-                }
-                strings.write_string(sb, "}\n")
-                
-                return
-            }
-    
-            // otherwise, serialize as a standard array
-            strings.write_string(sb, "[")
-    
-            // use a different spacing delimiter between fields vs objects/arrays  
-            // TODO: probably pass this is a param to sub-field instead of determining delim based on field type alone
+            as_indexed  := .SERIALIZE_ARRAY_INDEXED in flags 
+            as_object   := .AS_OBJECT               in flags 
             
-            elem_delim: string = " "
-            #partial switch elem_tiv in elem_ti.variant {
-                case Type_Info_Array, 
-                     Type_Info_Slice, 
-                     Type_Info_Dynamic_Array, 
-                     Type_Info_Bit_Set, 
-                     Type_Info_Struct:
-                    elem_delim = "\n"
+            // by default, print structs and arrays on individual lines, all else print on one line
+            // perhaps we should also consider the number of elements?
+            // maybe strings should print on individual lines?
+            on_one_line := false
+            #partial switch elem_tiv in runtime.type_info_base(elem_ti).variant {
+                case Type_Info_Array, Type_Info_Slice, Type_Info_Dynamic_Array, Type_Info_Struct:
+                    break
+                    
+                case: // everything else
+                    on_one_line = true
             }
-            strings.write_string(sb, elem_delim)
-    
+            on_one_line |= .ON_ONE_LINE in flags
+            
+            elem_indent := on_one_line ? 0 : indent + 2
+            elem_delim  : string // declared outside the loop so that we can use it afterwards
+            
+            strings.write_byte(sb, 
+                as_indexed || as_object ? '{' : '['
+            )
+            strings.write_byte(sb, on_one_line ? ' ' : '\n')
+            
             for i in 0..<elem_count {
                 elem_any := any {
                     id   = elem_ti.id,
                     data = mem.ptr_offset(cast(^byte)data, elem_ti.size * i),
                 }
-                elem_flags := flags
-                serialize_any(sb, "", elem_any, indent + 2, elem_delim, elem_flags)
+                
+                // We have to figure out the delim on every frame so that we don't write
+                //   a comma after the last element when fields are all on one line.
+                elem_delim = type_io_data.serialize.member_delim
+                if elem_delim == "" {
+                    // I apologize for the nested ternary
+                    elem_delim = on_one_line ? ((i == elem_count-1) ? " " : ", ") : "\n"
+                }
+                
+                elem_name: string
+                if as_indexed do elem_name = fmt.tprint(i)
+                // TODO: as_object 
+                
+                elem_flags: Serialization_Flags
+                if .SKIP_ELEMS_IF_EMPTY in flags {
+                    elem_flags |= { .SKIP_IF_EMPTY }
+                }
+                
+                serialize_any(sb, 
+                    name   = elem_name, 
+                    value  = elem_any, 
+                    indent = elem_indent, 
+                    delim  = elem_delim, 
+                    flags  = elem_flags, 
+                )
             }
-    
-            // we only need to indent the closing bracket if the delimeter was newline
-            if elem_delim == "\n" {
-                for i in 0..<indent do strings.write_string(sb, " ")
-            }
-            strings.write_string(sb, "]")
+            
+            if !on_one_line do for i in 0..<indent do strings.write_string(sb, " ");
+            
+            strings.write_byte(sb, 
+                as_indexed || as_object ? '}' : ']'
+            )
             
             delim := delim != "" ? delim : "\n" 
             strings.write_string(sb, delim);
-    
+                
             return
         
         case Type_Info_String: 
@@ -644,6 +685,9 @@ Serialization_Flag :: enum {
   
     // when applied to a struct member, that member will always be serialized, even if 0-valued 
     SKIP_NEVER,
+    
+    // will skip array elems or struct members if they are empty
+    SKIP_ELEMS_IF_EMPTY,
   
     // serializes a struct as though it were an array, binding to fields by index rather than by name
     // this should only be used if the structure is stable, as changing the order of fields would cause parsing issues across program versions  
@@ -668,9 +712,15 @@ Serialization_Settings :: struct {
     flags          : Serialization_Flags,
     member_delim   : string,
   
-    // If you want to use a completely custom serialization procedure for a given data type.
-    // I would recommend against using this in general, unless you need to implement serialization for some complex data structure.
-    serialize_proc : proc(^strings.Builder, any) -> bool,
+    // Having completely customized serialization procedures that get all of the same parameters as serialzie_any
+    //   seems like it would be too much complication to ask the user to implement for what should be a simple 
+    //   interface for extending serialization.
+    // So instead, the intended usage is to offer amore simple callback in which the user is asked only to provided the stringified value.
+    // This will allow the usual code to handle all of the usual indentation, flags, etc.
+    // Technically, this is less powerful, but it is also so much simpler and I doubt that most people would have need for the options
+    //   offered by the more complex implementation.
+    // And if they do, they may as well write it into the library themself.
+    to_string_proc : proc(any) -> (string, bool),
 }
 
 Parse_Flags :: bit_set[Parse_Flag]
@@ -691,7 +741,8 @@ Parse_Settings :: struct {
 
 
 /*
-  Add parsing/serialization settings data for all of your data types here at startup.
+    Add parsing/serialization settings data for all of your data types here at startup.
+    In Jai, we would do as much of this as possible at compile time.
 */
 IO_Data_Lookup : map[typeid]IO_Data
 

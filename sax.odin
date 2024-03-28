@@ -87,7 +87,7 @@ SAX_parse_file :: proc(using ctxt: ^SAX_Parse_Context) -> bool {
             // an empty path means we are binding to the root of the file
             // we can only have one binding to the root of the file!
             if root.data_binding == nil {
-                root.data_binding = b
+                root.data_binding = b.binding
             } else {
                 log("Unable to bind multiple values to the root object!")
                 return false
