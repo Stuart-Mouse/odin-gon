@@ -38,6 +38,18 @@ SAX_Parse_Context :: struct {
     _field_depth  : int,
 }
 
+/*
+    Could change this to return flags instead.
+    This would allow for more fine grain control over what actions to take when returning from a callback.
+    
+    flags:
+        ERROR
+        SKIP_DIRECT_BINDING
+        SKIP_INDIRECT_BINDING
+        SKIP_FIELD
+        
+    
+*/
 SAX_Return_Code :: enum {
     ERROR = 0,
     OK    = 1,
@@ -63,6 +75,24 @@ print_field_address :: proc(field: ^SAX_Field) {
     }
     fmt.println()
 }
+
+
+/*
+    skip parsing an object or array, recursively
+        not worth it
+        requires too much of the existing logic, and the parts that aren't needed will already be skipped anyhow. 
+        
+    this would be far more simple if we had pre-parsed the tokens and verified correctness of the file at that level.   
+    Then we could just jump directly to the next token
+    
+    I had sort of planned to eventually move to pre-tokenizing the file, but had put it off 
+        because it works fine as is now and I'm working on more important features
+        because i wanted to try implementing custom parsing directives which take over parsing completely...
+        we could still implement those parsing directives into the tokenizer, but then we need to be able to define custom token types
+    
+        also the question remains as to whether we should tokenize into tokens or fields
+*/
+
 
 SAX_parse_file :: proc(using ctxt: ^SAX_Parse_Context) -> bool {
     root := SAX_Field {
@@ -149,161 +179,161 @@ SAX_parse_object :: proc(using ctxt: ^SAX_Parse_Context, parent: ^SAX_Field) -> 
                 field.type = .ARRAY
             case .ARRAY_END:
                 if parent.type != .ARRAY {
-                    log("GON parse error: Unexpected %v token \"%v\".", next_token_type, next_token);
+                    log("GON parse error: Unexpected %v token \"%v\".", next_token_type, next_token)
                     return false
                 }
                 return true
             case:
-                log("GON parse error: Unexpected %v token \"%v\".", next_token_type, next_token);
+                log("GON parse error: Unexpected %v token \"%v\".", next_token_type, next_token)
                 return false
         }
-
-        L_Direct_Binding: {
-            event_result: SAX_Return_Code = .OK;
-            if event_handler.field_read != nil {
-                event_result = event_handler.field_read(ctxt, &field)
-                if event_result == .ERROR do return false;
-            }
-            if event_result == .SKIP_BINDING {
-                break L_Direct_Binding
-            }
-
-            for &b in data_bindings {
-                // check that field address matched up to this point
-                // also skip completed matches
-                if b._path_depth < _field_depth || 
-                len(b._field_path) <= _field_depth {
-                    continue
-                }
-
-                // check if _field_path[_field_depth] is a match
-                if field.name != b._field_path[_field_depth] {
-                    continue
-                }
-                b._path_depth += 1
-
-                // check if we've matched the entire field address
-                if len(b._field_path) == b._path_depth {
-                    b._path_depth = -1                  // deactivate the binding so that it will be skipped in future checks
-                    field.data_binding = b.binding      // set the data binding
-                }
-            }
+        
+        event_result: SAX_Return_Code = .OK
+        if event_handler.field_read != nil {
+            event_result = event_handler.field_read(ctxt, &field)
+            if event_result == .ERROR do return false
         }
         
-        // Processing for indirect data bindings is still very language-specific.
-        // If we create version of this parser for other languages, this should probably be factored into a separate procedure so that it is more apparent that this is not language agnostic like the rest of the procedure.
-        // check_for_indirect_bindings() could basically be a SAX_Event_Handler_Proc
-        L_Indirect_Binding: if parent != nil && parent.data_binding != nil {
-            event_result: SAX_Return_Code = .OK;
-            if event_handler.indirect_data_binding != nil {
-                event_result = event_handler.indirect_data_binding(ctxt, &field)
-                if event_result == .ERROR do return false
+        // If .SKIP_BINDING is returned from the field_read event, then the field will not receive any automatic data bindings whatsoever.
+        // However, if the user sets the data binding manually in the callback, that data binding will still be processed.
+        if event_result != .SKIP_BINDING {
+            L_Direct_Binding: {
+                for &b in data_bindings {
+                    // check that field address matched up to this point
+                    // also skip completed matches
+                    if b._path_depth < _field_depth || 
+                    len(b._field_path) <= _field_depth {
+                        continue
+                    }
+    
+                    // check if _field_path[_field_depth] is a match
+                    if field.name != b._field_path[_field_depth] {
+                        continue
+                    }
+                    b._path_depth += 1
+    
+                    // check if we've matched the entire field address
+                    if len(b._field_path) == b._path_depth {
+                        b._path_depth = -1                  // deactivate the binding so that it will be skipped in future checks
+                        field.data_binding = b.binding      // set the data binding
+                    }
+                }
             }
-            if event_result == .SKIP_BINDING {
-                break L_Indirect_Binding
-            }
-
-            parent_ti := runtime.type_info_base(type_info_of(parent.data_binding.id))
-            #partial switch &parent_tiv in parent_ti.variant {
-                case runtime.Type_Info_Map:
-                    assert(parent.type == .OBJECT)
-                    raw_map := cast(^runtime.Raw_Map) parent.data_binding.data
-                    
-                    // This is a leak, need to figure out how to give the user some idea 
-                    //   that he needs to clone these strings and manage them himself.
-                    name_copy := strings.clone(field.name)
-                    key       := cast(rawptr) &name_copy
-                    
-                    runtime.__dynamic_map_check_grow(raw_map, parent_tiv.map_info)
-                    
-                    // allocate empty space that can be safely memcopied from
-                    // this has to be done because apparently there's no way to insert a hash 
-                    //   dynamically without passing a value
-                    empty_value := cast(rawptr) raw_data(make([]u8, parent_tiv.value.size, context.temp_allocator))
-
-                    value := runtime.__dynamic_map_set_without_hash(
-                        raw_map, parent_tiv.map_info, key, empty_value,
-                    )
-                    
-                    field.data_binding = any { rawptr(value), parent_tiv.value.id }
             
-                case runtime.Type_Info_Bit_Set:
-                    assert(parent.type == .ARRAY)
-                    field.data_binding = parent.data_binding
-
-                case runtime.Type_Info_Dynamic_Array:
-                    if .PARSE_ARRAY_INDEXED in parent.io_data.parse.flags {
-                        assert(parent.type == .OBJECT) // TODO
-                        field.index = strconv.atoi(field.name)
-                        field.data_binding = array_add_any_at_index(parent.data_binding, field.index)
-                    } else {
-                        assert(parent.type == .ARRAY) // TODO
-                        field.data_binding = array_add_any(parent.data_binding)
-                    }
-                    
-                    if field.data_binding == nil {
-                        return false
-                    }
-
-                case runtime.Type_Info_Array:
-                    if .PARSE_ARRAY_INDEXED in parent.io_data.parse.flags {
-                        field.index = strconv.atoi(field.name)
-                    }
-                    
-                    if field.index >= parent_tiv.count {
-                        log("Unable to add to array, ran out of space.")
-                        return false
-                    } else {
-                        elem_ti := runtime.type_info_base(parent_tiv.elem)
-                        field.data_binding = any {
-                            data = mem.ptr_offset(cast(^u8)parent.data_binding.data, elem_ti.size * field.index),
-                            id   = parent_tiv.elem.id,
-                        }
-                    }
-
-                case runtime.Type_Info_Slice:
-                    raw_slice := cast(^runtime.Raw_Slice) parent.data_binding.data
-                    
-                    if .PARSE_ARRAY_INDEXED in parent.io_data.parse.flags {
-                        field.index = strconv.atoi(field.name)
-                    }
-                    
-                    if field.index >= raw_slice.len {
-                        log("Unable to add to slice, ran out of space.")
-                        return false
-                    } else {
-                        elem_ti := runtime.type_info_base(parent_tiv.elem)
-                        field.data_binding = any {
-                            data = mem.ptr_offset(cast(^u8)raw_slice.data, elem_ti.size * field.index),
-                            id   = parent_tiv.elem.id,
-                        }
-                    }
-
-                case runtime.Type_Info_Struct:
-                    member: reflect.Struct_Field
-                    #partial switch parent.type {
-                        case .ARRAY : member = reflect.struct_field_at     (parent_ti.id, field.index)
-                        case .OBJECT: member = reflect.struct_field_by_name(parent_ti.id, field.name ) 
-                    }
-                    // NOTE: should we check that member is not name member? 
-                    // (No, because name member is only used when struct is within an array.)
-                    if member != {} {
-                        // TODO: probably need to implement merge proc for io_data struct. 
-                        // We may want to automatically merge the type io data with the member io data, 
-                        // but how to do this well is unclear. Will just leave it up to the user for now.
-                        found: bool
-                        field.io_data, found = parent.io_data.member_data[member.name]
+            // Processing for indirect data bindings is still very language-specific.
+            // If we create version of this parser for other languages, this should probably be factored into a separate procedure so that it is more apparent that this is not language agnostic like the rest of the procedure.
+            // check_for_indirect_bindings() could basically be a SAX_Event_Handler_Proc
+            L_Indirect_Binding: if parent != nil && parent.data_binding != nil {
+                event_result: SAX_Return_Code = .OK;
+                if event_handler.indirect_data_binding != nil {
+                    event_result = event_handler.indirect_data_binding(ctxt, &field)
+                    if event_result == .ERROR do return false
+                }
+                
+                if event_result == .SKIP_BINDING {
+                    break L_Indirect_Binding
+                }
+    
+                parent_ti := runtime.type_info_base(type_info_of(parent.data_binding.id))
+                #partial switch &parent_tiv in parent_ti.variant {
+                    case runtime.Type_Info_Map:
+                        assert(parent.type == .OBJECT)
+                        raw_map := cast(^runtime.Raw_Map) parent.data_binding.data
                         
-                        field.data_binding = any {
-                            data = mem.ptr_offset(cast(^u8)parent.data_binding.data, member.offset),
-                            id   = member.type.id,
+                        // This is a leak, need to figure out how to give the user some idea 
+                        //   that he needs to clone these strings and manage them himself.
+                        name_copy := strings.clone(field.name)
+                        key       := cast(rawptr) &name_copy
+                        
+                        runtime.__dynamic_map_check_grow(raw_map, parent_tiv.map_info)
+                        
+                        // allocate empty space that can be safely memcopied from
+                        // this has to be done because apparently there's no way to insert a hash 
+                        //   dynamically without passing a value
+                        empty_value := cast(rawptr) raw_data(make([]u8, parent_tiv.value.size, context.temp_allocator))
+    
+                        value := runtime.__dynamic_map_set_without_hash(
+                            raw_map, parent_tiv.map_info, key, empty_value,
+                        )
+                        
+                        field.data_binding = any { rawptr(value), parent_tiv.value.id }
+                
+                    case runtime.Type_Info_Bit_Set:
+                        assert(parent.type == .ARRAY)
+                        field.data_binding = parent.data_binding
+    
+                    case runtime.Type_Info_Dynamic_Array:
+                        if .PARSE_ARRAY_INDEXED in parent.io_data.parse.flags {
+                            assert(parent.type == .OBJECT) // TODO
+                            field.index = strconv.atoi(field.name)
+                            field.data_binding = array_add_any_at_index(parent.data_binding, field.index)
+                        } else {
+                            assert(parent.type == .ARRAY) // TODO
+                            field.data_binding = array_add_any(parent.data_binding)
                         }
-                    }
+                        
+                        if field.data_binding == nil {
+                            return false
+                        }
+    
+                    case runtime.Type_Info_Array:
+                        if .PARSE_ARRAY_INDEXED in parent.io_data.parse.flags {
+                            field.index = strconv.atoi(field.name)
+                        }
+                        
+                        if field.index >= parent_tiv.count {
+                            log("Unable to add to array, ran out of space.")
+                            return false
+                        } else {
+                            elem_ti := runtime.type_info_base(parent_tiv.elem)
+                            field.data_binding = any {
+                                data = mem.ptr_offset(cast(^u8)parent.data_binding.data, elem_ti.size * field.index),
+                                id   = parent_tiv.elem.id,
+                            }
+                        }
+    
+                    case runtime.Type_Info_Slice:
+                        raw_slice := cast(^runtime.Raw_Slice) parent.data_binding.data
+                        
+                        if .PARSE_ARRAY_INDEXED in parent.io_data.parse.flags {
+                            field.index = strconv.atoi(field.name)
+                        }
+                        
+                        if field.index >= raw_slice.len {
+                            log("Unable to add to slice, ran out of space.")
+                            return false
+                        } else {
+                            elem_ti := runtime.type_info_base(parent_tiv.elem)
+                            field.data_binding = any {
+                                data = mem.ptr_offset(cast(^u8)raw_slice.data, elem_ti.size * field.index),
+                                id   = parent_tiv.elem.id,
+                            }
+                        }
+    
+                    case runtime.Type_Info_Struct:
+                        member: reflect.Struct_Field
+                        #partial switch parent.type {
+                            case .ARRAY : member = reflect.struct_field_at     (parent_ti.id, field.index)
+                            case .OBJECT: member = reflect.struct_field_by_name(parent_ti.id, field.name ) 
+                        }
+                        // NOTE: should we check that member is not name member? 
+                        // (No, because name member is only used when struct is within an array.)
+                        if member != {} {
+                            // TODO: probably need to implement merge proc for io_data struct. 
+                            // We may want to automatically merge the type io data with the member io data, 
+                            // but how to do this well is unclear. Will just leave it up to the user for now.
+                            found: bool
+                            field.io_data, found = parent.io_data.member_data[member.name]
+                            
+                            field.data_binding = any {
+                                data = mem.ptr_offset(cast(^u8)parent.data_binding.data, member.offset),
+                                id   = member.type.id,
+                            }
+                        }
+                }
             }
         }
         
-        // NOTE: Factoring this out here may turn out to improve performance if it gets inlined, 
-        //       so perhaps that is another reason to keep it this way going forward.
         if field.data_binding != nil {
             type_io_data, found := IO_Data_Lookup[field.data_binding.id]
             if found {
@@ -314,7 +344,7 @@ SAX_parse_object :: proc(using ctxt: ^SAX_Parse_Context, parent: ^SAX_Field) -> 
                 return false
             }
         }
-        
+
         // recurse for object / array
         if field.type == .OBJECT || field.type == .ARRAY {
             _field_depth += 1

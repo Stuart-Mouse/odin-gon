@@ -47,12 +47,17 @@ prevent multiple bindings to the same field?
                 Alternatively, our basic token could be the fields themselves. But then of course, we are essentially just constructing a flat DOM, like what the original uGON parser did.
                     This may actually be a good idea from an API point of view, since we could then potentially feed input from other file types (like XML, JSON) into the sax parser, allowing for multiple tokenizer implementations more easily.
                         we could separate the implementation into frontends that just generate a []SAX_Field, and a backend to handle data bindings/callbacks
-                
+        
         For now, I think it would be judicious to simply disallow multiple bindings by default, and *perhaps* we could consider adding them back in in the future if they would actually provide any utility.
         Serialization definitely cannot allow multiple bindings to the same field.
         We should not change the tokenization implementation until serialization is properly figured out, IO_Data is useful and complete
             Once the GON parser is actually a complete GON parser, then we can *begin* to think about how the SAX engine can be made to work with other formats
-            The same goes for the GenericDOM ideas that have been floating around in my head.         
+            The same goes for the GenericDOM ideas that have been floating around in my head.
+        
+        Addendum:
+        The only practical reason to allow multiple bindings to the same object would be for 'usings' on structs.
+        And even still, we would not actually need to have multiple bindings per se, we would just add some extra logic to match fields to the struct members of a using'd struct of our outer struct.
+        For serialization, its as simple as just not writing the name and braces for the using'd struct and not increasing the indent.
         
 
 add the ability to create a data binding to a field whose name contains the / character.
@@ -72,22 +77,12 @@ implement a field_mappings file that specifies all data bindings
 implement callbacks
     create some helpful utility callbacks and provide them with the library
         setting a separate array count variable when writing to a static array or slice (needs to also prevent data binding to this field)
-        
-parsing/serializing arrays where index matters (e.g. lookup tables)
-    can serialize the array as a gon object and use the gon object name of each element as the index
-```
-lookup {
-    1 { ... }
-    2 { ... }
-    3 { ... }
-}
-```
 
 parse map[string] T types
     fix memory leak issue
         should it just be part of the API that the user needs to handle any strings read in as map keys? 
+        optionally use struct name member as key for map types
     
-
 struct intialization
     always zero memory?
         only when parent is array
@@ -108,10 +103,12 @@ allocations for pointers and slices
 
 ### Serialization
 
-*not yet implemented*
 
 Implemented serialization of map[string] T types
   still should probably implement maps with int/enum keys
+    the need for this, at least for me, is mostly assuaged by the already implemented support for indexed arrays
+
+Implement parsing and serialization of enumerated arrays
 
 serialize to a nested path
     this will require totally rewriting the serialization procedure to be more non-linear
@@ -133,7 +130,6 @@ serialize data through pointers (again, optionally)
 @gon_serialize_never tag on struct members (for things like pointers or sensitive data)
 @gon_serialize_as_array tag for structs
 @gon_serialize_as_object tag for arrays/slices of structs
-
 
 set the delimeter to use between members of a struct
     for example, we may want to serialize a short struct like:
@@ -212,7 +208,11 @@ Things you may want to do:
     set field data binding through custom logic
     alter parent field based on content of field
 
+
 ### data_binding
+
+This event occurs when a field is fully formed and is 
+
 
 ### indirect_data_binding
 
@@ -281,4 +281,61 @@ While it would be unfortunate to need to use such a structure, we could probably
     
 perhaps I should stop writing on serialization at the moment since my current understanding 
     of how to structure it, even for GON, is underinformed
+
+
+
+
+
+
+
+
+
+
+Parsing Structure
+
+
+
+parse_object {
+    read token for name
+    read token for value (also tells us field type)
+    
+    field_read callback
+        provides an opportunity to skip both direct and indirect data bindings
+        can't really think of a reason why one would want to skip direct data bindings, since they presumably set up those bindings themself when creating the parse context
+        should be able to skip a field entirely
+            for objects/arrays, scan for end token skipping all sub-fields
+                we could have an option to do this when there are no data bindings on the current field path (direct or indirect)
+                    only complication would be if some callback would have matched on a sub-field, hence why this should be an optional thing
+                
+    direct data bindings
+        really no reason to skip this unless we are skipping the entire field
+    
+    indirect data bindings
+        indirect data binding callback
+            note: we should actually change this name back to parent_data_bind, because the current name makes it sound as if this is only called when an indirect binding has been made
+                  when in fact it is called for every field inside a parent object which has a data binding.
+            provides an opportunity to skip indirect data bindings
+            optimal place to add custom handling for data strucutres like linked lists
+            
+    process data binding
+        data binding callback
+        
+        normal processing
+            type checking for gon -> internal compatibility
+            for fields
+                set value of binding
+            for objects/arrays
+                initialize if necessary
+        
+    if object or array type
+        object_begin callback
+        recurse for objects and arrays
+        object_end callback
+}
+
+As it stands now, callbacks have access to all information that the SAX parser itself has, nothing is hidden.
+    The user could very easily screw up parsing by manipulating various things in the parse_context
+    But I do not really want to reduce the power of the callbacks due to this.
+    peope should simply not write code that will introduce bugs, the parser is simple enough and following some very basic conventions should prevent bugs from arising
+
 

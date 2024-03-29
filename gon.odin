@@ -218,18 +218,21 @@ serialize_any :: proc(
     
     if type_io_data.serialize.to_string_proc != nil {
         for i in 0..<indent do strings.write_string(sb, " ")
-
-        str, ok := type_io_data.serialize.to_string_proc(value)
+    
+        // TODO: name this variables better
+        // Custom serialization proc can return both name and value strings
+        x_name, x_value, ok := type_io_data.serialize.to_string_proc(value)
         if !ok do return
 
         if name != "" {
+            if x_name == "" do x_name = name // use default name if none provided by the custom serialization proc
             strings.write_string(sb, 
-                to_conformant_string(name, allocator = context.temp_allocator),
+                to_conformant_string(x_name, allocator = context.temp_allocator),
             )
             strings.write_string(sb, " ");
         }
-              
-        fmt.sbprintf(sb, "%v", to_conformant_string(str))
+        
+        fmt.sbprintf(sb, "%v", to_conformant_string(x_value))
         
         delim := delim != "" ? delim : "\n" 
         strings.write_string(sb, delim)
@@ -268,11 +271,11 @@ serialize_any :: proc(
                 
                 // We have to figure out the delim on every frame so that we don't write
                 //   a comma after the last element when fields are all on one line.
-                member_delim := type_io_data.serialize.member_delim
-                if member_delim == "" {
+                // member_delim := type_io_data.serialize.member_delim
+                // if member_delim == "" {
                     // I apologize for the nested ternary
-                    member_delim = on_one_line ? ((i == member_count-1) ? " " : ", ") : "\n"
-                }
+                    member_delim := on_one_line ? ((i == member_count-1) ? " " : ", ") : "\n"
+                // }
                 
                 member_flags: Serialization_Flags
                 if .SKIP_ELEMS_IF_EMPTY in flags {
@@ -384,11 +387,11 @@ serialize_any :: proc(
                 
                 // We have to figure out the delim on every frame so that we don't write
                 //   a comma after the last element when fields are all on one line.
-                elem_delim = type_io_data.serialize.member_delim
-                if elem_delim == "" {
+                // elem_delim = type_io_data.serialize.member_delim
+                // if elem_delim == "" {
                     // I apologize for the nested ternary
                     elem_delim = on_one_line ? ((i == elem_count-1) ? " " : ", ") : "\n"
-                }
+                // }
                 
                 elem_name: string
                 if as_indexed do elem_name = fmt.tprint(i)
@@ -675,18 +678,13 @@ all_bytes_are_zero_data :: proc(data: rawptr, len: int) -> bool {
 
 Serialization_Flags :: bit_set[Serialization_Flag]
 Serialization_Flag :: enum {
-    // when applied to a struct member, that member will never be serialized 
-    SKIP_ALWAYS,
-  
     // the struct member or data type will be skipped during serialization if 0-valued
     // arrays will also be skipped if all elements are 0-valued
     // elements within indexed arrays will also be skipped if 0-valued
     SKIP_IF_EMPTY,
   
-    // when applied to a struct member, that member will always be serialized, even if 0-valued 
-    SKIP_NEVER,
-    
     // will skip array elems or struct members if they are empty
+    // will not skip the array/object itself due to being empty, you would just get "array []" or "object {}"
     SKIP_ELEMS_IF_EMPTY,
   
     // serializes a struct as though it were an array, binding to fields by index rather than by name
@@ -697,20 +695,20 @@ Serialization_Flag :: enum {
     // this is primarily used just to make some files more human readable/editable
     AS_OBJECT,
     
-    // 
+    // serialize an object or array on a single line
+    // uses ", " as field delimiter by default, so you don't need to manually set a custom delim
     ON_ONE_LINE,
-  
-    // to be used when some data type or struct member represents sensitive data
-    // will only be serialized when the corresponding flag is present in the serialization settings
-    SENSITIVE,
   
     // serializes an array as a GON object, using the index of each element as the name for the object
     SERIALIZE_ARRAY_INDEXED,
 }
 
 Serialization_Settings :: struct {
-    flags          : Serialization_Flags,
-    member_delim   : string,
+    flags : Serialization_Flags,
+    
+    // TODO: make decision whether to properly remove
+    // Not really necessary. Realistically, there's no reason to need to set the delim manually now that we have the on_one_line flag
+    // member_delim   : string, 
   
     // Having completely customized serialization procedures that get all of the same parameters as serialzie_any
     //   seems like it would be too much complication to ask the user to implement for what should be a simple 
@@ -720,7 +718,7 @@ Serialization_Settings :: struct {
     // Technically, this is less powerful, but it is also so much simpler and I doubt that most people would have need for the options
     //   offered by the more complex implementation.
     // And if they do, they may as well write it into the library themself.
-    to_string_proc : proc(any) -> (string, bool),
+    to_string_proc : proc(any) -> (string, string, bool),
 }
 
 Parse_Flags :: bit_set[Parse_Flag]
@@ -755,6 +753,10 @@ IO_Data :: struct {
     member_data : map[string]IO_Data,
 }
 
+// Do we really even want or need these wrapper functions? 
+// Currently, they are very much superfluous.
+
+// get io_data by pointer, which may not be desirable in all cases
 get_io_data :: proc(type: typeid) -> (^IO_Data, bool) {
     io_data, found := &IO_Data_Lookup[type]
     return io_data, found
@@ -763,6 +765,11 @@ get_io_data :: proc(type: typeid) -> (^IO_Data, bool) {
 register_io_data :: proc(type: typeid, io_data: IO_Data) {
     IO_Data_Lookup[type] = io_data
 }
+
+
+
+
+
 
 // Data_Mappings :: struct {
 
