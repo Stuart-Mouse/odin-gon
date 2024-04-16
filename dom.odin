@@ -48,7 +48,7 @@ DOM_parse_object :: proc(gon_file: ^DOM_File, parent: int, str: ^string) -> bool
 
         // read field name
         if fields[parent].type != .ARRAY {
-            next_token_type, next_token = get_next_token(str)
+            next_token_type, next_token = get_next_token_gon(str)
             #partial switch next_token_type {
                 case .EOF:
                 return true
@@ -67,7 +67,7 @@ DOM_parse_object :: proc(gon_file: ^DOM_File, parent: int, str: ^string) -> bool
         }
 
         // read field value and append
-        next_token_type, next_token = get_next_token(str)
+        next_token_type, next_token = get_next_token_gon(str)
         #partial switch next_token_type {
             case .STRING:
                 field.type = .FIELD

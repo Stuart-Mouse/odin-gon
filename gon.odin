@@ -52,28 +52,38 @@ Field_Type :: enum {
     ARRAY   = 3,
 }
 
-print_all_tokens :: proc(file: string) {
-    file := file
-    next_token_type : Token_Type
-    next_token      : string
-    fmt.println("Tokens in file:")
-    for {
-        next_token_type, next_token = get_next_token(&file)
-        #partial switch next_token_type {
-            case .INVALID:      fmt.println("INV"); return
-            case .EOF:          fmt.println("EOF"); return
-            case .OBJECT_BEGIN: fmt.println("{")
-            case .OBJECT_END:   fmt.println("}")
-            case .ARRAY_BEGIN:  fmt.println("[")
-            case .ARRAY_END:    fmt.println("]")
-            case: fmt.println(next_token)
-        }
+// print_all_tokens :: proc(file: string) {
+//     file := file
+//     next_token_type : Token_Type
+//     next_token      : string
+//     fmt.println("Tokens in file:")
+//     for {
+//         next_token_type, next_token = get_next_token(&ctxt)
+//         #partial switch next_token_type {
+//             case .INVALID:      fmt.println("INV"); return
+//             case .EOF:          fmt.println("EOF"); return
+//             case .OBJECT_BEGIN: fmt.println("{")
+//             case .OBJECT_END:   fmt.println("}")
+//             case .ARRAY_BEGIN:  fmt.println("[")
+//             case .ARRAY_END:    fmt.println("]")
+//             case: fmt.println(next_token)
+//         }
+//     }
+//     fmt.println()
+// }
+
+get_next_token :: proc(ctxt: ^SAX_Parse_Context) -> (Token_Type, string) {
+    switch ctxt.tokenizer.type {
+        case .GON:
+            return get_next_token_gon(&ctxt.tokenizer.gon.file)
+        case .JSON:
+            return get_next_token_json(&ctxt.tokenizer.json)
     }
-    fmt.println()
+    return .INVALID, ""
 }
 
 // mutates the passed string, advancing it to the position after the returned token
-get_next_token :: proc(file: ^string) -> (Token_Type, string) {
+get_next_token_gon :: proc(file: ^string) -> (Token_Type, string) {
     if len(file^) <= 0 do return .EOF, ""
     if !skip_whitespace_and_comments(file) do return .EOF, ""
     if len(file^) <= 0 do return .EOF, ""
@@ -580,71 +590,82 @@ dynamic_int_cast :: proc(dst, src: any, enforce_size := false) -> bool {
     // This is kind of an ugly solution
     // But basically, just filter out all types which are not int, enum, or bool types
     #partial switch tiv in ti_src.variant {
-        case Type_Info_Integer:
-        case Type_Info_Enum:
-        case Type_Info_Boolean:
-        case Type_Info_Bit_Set:
+        case Type_Info_Integer,
+             Type_Info_Enum,
+             Type_Info_Boolean,
+             Type_Info_Bit_Set:
+             
         case: return false
     }
     #partial switch tiv in ti_dst.variant {
-        case Type_Info_Integer:
-        case Type_Info_Enum:
-        case Type_Info_Boolean:
-        case Type_Info_Bit_Set:
+        case Type_Info_Integer,
+             Type_Info_Enum,
+             Type_Info_Boolean,
+             Type_Info_Bit_Set:
+        
         case: return false
     }
   
     i64_value: i64
   
     switch ti_src.size {
-        case 1 : i64_value = auto_cast (cast(^i8  )src.data)^
-        case 2 : i64_value = auto_cast (cast(^i16 )src.data)^
-        case 4 : i64_value = auto_cast (cast(^i32 )src.data)^
-        case 8 : i64_value = auto_cast (cast(^i64 )src.data)^
+        case  1: i64_value = auto_cast (cast(^i8  )src.data)^
+        case  2: i64_value = auto_cast (cast(^i16 )src.data)^
+        case  4: i64_value = auto_cast (cast(^i32 )src.data)^
+        case  8: i64_value = auto_cast (cast(^i64 )src.data)^
         case 16: i64_value = auto_cast (cast(^i128)src.data)^
     }
   
     switch ti_dst.size {
-        case 1 : (cast(^i8  )dst.data)^ = auto_cast i64_value
-        case 2 : (cast(^i16 )dst.data)^ = auto_cast i64_value
-        case 4 : (cast(^i32 )dst.data)^ = auto_cast i64_value
-        case 8 : (cast(^i64 )dst.data)^ = auto_cast i64_value
+        case  1: (cast(^i8  )dst.data)^ = auto_cast i64_value
+        case  2: (cast(^i16 )dst.data)^ = auto_cast i64_value
+        case  4: (cast(^i32 )dst.data)^ = auto_cast i64_value
+        case  8: (cast(^i64 )dst.data)^ = auto_cast i64_value
         case 16: (cast(^i128)dst.data)^ = auto_cast i64_value
     }
   
     return true
 }
 
-dynamic_float_cast :: proc(dst, src: any, enforce_size := false) -> bool {
+dynamic_float_cast :: proc(dst, src: any) -> bool {
     using runtime
-  
+    
     ti_src := type_info_base(type_info_of(src.id))
     ti_dst := type_info_base(type_info_of(dst.id))
-  
-    if enforce_size && ti_src.size > ti_dst.size {
-        return false
-    }
-  
-    _, allow_src := ti_src.variant.(Type_Info_Float)
+    
     _, allow_dst := ti_dst.variant.(Type_Info_Float)
-    if !allow_src || !allow_dst {
+    
+    if !allow_dst {
         return false
     }
-  
+    
     f64_value: f64
-  
-    switch ti_src.size {
-        case 2: f64_value = auto_cast (cast(^f16)src.data)^
-        case 4: f64_value = auto_cast (cast(^f32)src.data)^
-        case 8: f64_value = auto_cast (cast(^f64)src.data)^
+    
+    #partial switch tiv in ti_src.variant {
+        case Type_Info_Float:
+            switch ti_src.size {
+                case 2: f64_value = auto_cast (cast(^f16)src.data)^
+                case 4: f64_value = auto_cast (cast(^f32)src.data)^
+                case 8: f64_value = auto_cast (cast(^f64)src.data)^
+            }
+        case Type_Info_Integer:
+            switch ti_src.size {
+                case  1: f64_value = auto_cast (cast(^i8  )src.data)^
+                case  2: f64_value = auto_cast (cast(^i16 )src.data)^
+                case  4: f64_value = auto_cast (cast(^i32 )src.data)^
+                case  8: f64_value = auto_cast (cast(^i64 )src.data)^
+                case 16: f64_value = auto_cast (cast(^i128)src.data)^
+            }
+        case:
+            return false
     }
-  
+    
     switch ti_dst.size {
         case 2: (cast(^f16)dst.data)^ = auto_cast f64_value
         case 4: (cast(^f32)dst.data)^ = auto_cast f64_value
         case 8: (cast(^f64)dst.data)^ = auto_cast f64_value
     }
-  
+    
     return true
 }
 

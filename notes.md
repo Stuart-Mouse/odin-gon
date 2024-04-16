@@ -11,23 +11,20 @@ In addition to the direct data bindings that the user defines, indirect bindings
 
 ## ToDo
 
-serialization of map types
-serialization of objects through pointers (may require the use a special struct member note)
+serialization of objects through pointers
 
-### IMGUI Integration
 
-create a modal window for viewing/editting any data as GON
-user can exit the window without saving or may overwrite the original data.
-In order to prevent memory issues, we may add options to the window to disable editting of certain types of data.
-
-In TreeNodeAny, 
-    add the ability to right-click a node to open the GON modal window with the any data
-    add the ability to edit things through pointers
-
-create a window for generally browsing all of the major static data structures in the program with TreeNodeAny
 
 
 ### Parsing
+
+special handling for polymorphic structs based on their base struct type 
+    performing this comparison automatically would mean iterating over all of the types in io_data_lookup
+        could create a second lookup specifically for polymorphic types
+    better solution would be to implement a dynamic array for storing "default callbacks"
+        these default callbacks would be automatically appended in the parse context unless the caller opts out
+        still need to be able to have multiple callbacks in general...
+        then we can just proviude a sample callback for matching on polymorphic base type and allow user to implement extra logic as desired
 
 prevent multiple bindings to the same field?
     We should probably do this because:
@@ -284,6 +281,40 @@ perhaps I should stop writing on serialization at the moment since my current un
 
 
 
+doesn't really matter to the structure of the program whether we ultimately decide to pretokenize or not
+    pre-tokenizing would allow us to pre-validate the file to make sure we will not get tripped up on a syntax error later on
+    
+
+I think for now it makes sense to stick to running our SAX parser on a stream of tokens instead of on a stream of fields
+    the main reason being objects/arrays
+        then again, no reason we cannot simply have a size/count setup like we did before in my C gon parser
+        
+    still, whether we pre-fieldize, pre-tokenize, or lazily retrieve tokens only matters so much
+    
+in parsing:
+    the language front-end emits tokens/fields
+    we parse over the tokens/fields and run callbacks, process data bindings
+
+in serialization:
+    I was not sure whatto do about serialization for quite a while, but I think I may now have some kind of idea
+    basically just do the parsing process in reverse
+    
+    read over the data we want to serialize and emit tokens from the data
+    these tokens are taken in by the language front-end which then emit the final text
+        whether the language wants to just linearly append to a string builder or do something more complex is up to the language
+
+    we may or may not be able to pre-tokenize our data for serialization
+        not sure yet if this would be doable or desirable
+
+    but, if we feed the language serializer lazily, that may mean a lot more overhead within the serializer to handle nested objects, since we cannot 
+    
+    either we feed the serializer, or we have it consume from the input data
+        how is this any different ultimately from just writing individual serializers for each language?
+            more abstracted, could capture some common cases, custom serialization rules
+            would also handle concerns of nested data bindings, which is a biggie
+            but there will also be certain rules that would only apply for specific languages...
+                who gives hints to who, who is authoritative?
+    
 
 
 
@@ -337,5 +368,11 @@ As it stands now, callbacks have access to all information that the SAX parser i
     The user could very easily screw up parsing by manipulating various things in the parse_context
     But I do not really want to reduce the power of the callbacks due to this.
     peope should simply not write code that will introduce bugs, the parser is simple enough and following some very basic conventions should prevent bugs from arising
+
+
+
+
+
+
 
 

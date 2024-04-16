@@ -10,6 +10,8 @@ import "core:mem"
 import "core:unicode/utf8"
 import "core:math"
 
+import "core:encoding/json"
+
 
 SAX_Field :: struct {
     name         : string,
@@ -29,13 +31,86 @@ Data_Binding :: struct {
     _path_depth : int,
 }
 
-SAX_Parse_Context :: struct {
-    file          : string,
-    data_bindings : []Data_Binding,
+
+SAX_File_Format :: enum {
+    GON,
+    JSON,
+}
+
+SAX_Tokenizer :: struct {
+    type: SAX_File_Format,
+    using variant: struct #raw_union {
+        json: json.Tokenizer,
+        gon: GON_Tokenizer,
+    },
+}
+
+GON_Tokenizer :: struct {
+    file: string,
+}
+
+SAX_Parse_Context :: struct {    
+    tokenizer     : SAX_Tokenizer,
+    
+    data_bindings : [dynamic] Data_Binding,
     event_handler : SAX_Event_Handler,
     log           : Log_Proc,
 
     _field_depth  : int,
+}
+
+SAX_Parse_Context_Init_Flags :: bit_set [SAX_Parse_Context_Init_Flag]
+SAX_Parse_Context_Init_Flag  :: enum {
+    DO_NOT_INCLUDE_STANDARD_EVENT_HANDLER,
+}
+
+init_parse_context :: proc(ctxt: ^SAX_Parse_Context, flags: SAX_Parse_Context_Init_Flags) {
+    if .DO_NOT_INCLUDE_STANDARD_EVENT_HANDLER not_in flags {
+        append_elems(&ctxt.event_handler.field_read           , ..standard_event_handler.field_read[:])
+        append_elems(&ctxt.event_handler.data_binding         , ..standard_event_handler.data_binding[:])
+        append_elems(&ctxt.event_handler.indirect_data_binding, ..standard_event_handler.indirect_data_binding[:])
+        append_elems(&ctxt.event_handler.object_begin         , ..standard_event_handler.object_begin[:])
+        append_elems(&ctxt.event_handler.object_end           , ..standard_event_handler.object_end[:])
+    }
+}
+
+set_file_to_parse :: proc(ctxt: ^SAX_Parse_Context, file: string, file_format: SAX_File_Format = .GON) {
+    ctxt.tokenizer.type = file_format
+    switch file_format {
+        case .GON:
+            ctxt.tokenizer.gon.file = file
+        case .JSON:
+            ctxt.tokenizer.json = json.make_tokenizer(file)
+    }
+}
+
+add_data_binding :: proc(ctxt: ^SAX_Parse_Context, binding: any, path: string) {
+    append(&ctxt.data_bindings, Data_Binding { 
+        binding    = binding, 
+        field_path = path,
+    })
+}
+
+add_event_handler :: proc(event_handler: ^SAX_Event_Handler, event_type: SAX_Event_Type, handler_proc: SAX_Event_Handler_Proc) {
+    dst: ^[dynamic]SAX_Event_Handler_Proc
+
+    switch event_type {
+        case .OBJECT_BEGIN:
+            dst = &event_handler.object_begin
+        case .OBJECT_END:
+            dst = &event_handler.object_end
+        case .FIELD_READ:
+            dst = &event_handler.field_read
+        case .DATA_BINDING:
+            dst = &event_handler.data_binding
+        case .INDIRECT_DATA_BINDING:
+            dst = &event_handler.indirect_data_binding
+        case: 
+            fmt.println("Error: Tried to add an event handler for an invalid event type!")
+            assert(false)
+    }
+
+    append(dst, handler_proc)
 }
 
 /*
@@ -47,7 +122,6 @@ SAX_Parse_Context :: struct {
         SKIP_DIRECT_BINDING
         SKIP_INDIRECT_BINDING
         SKIP_FIELD
-        
     
 */
 SAX_Return_Code :: enum {
@@ -64,8 +138,18 @@ SAX_Event_Handler :: struct {
     object_end,
     field_read,
     data_binding,
-    indirect_data_binding : SAX_Event_Handler_Proc
+    indirect_data_binding : [dynamic] SAX_Event_Handler_Proc
 }
+
+SAX_Event_Type :: enum {
+    OBJECT_BEGIN,
+    OBJECT_END,
+    FIELD_READ,
+    DATA_BINDING,
+    INDIRECT_DATA_BINDING,
+}
+
+standard_event_handler: SAX_Event_Handler
 
 print_field_address :: proc(field: ^SAX_Field) {
     f := field
@@ -76,22 +160,13 @@ print_field_address :: proc(field: ^SAX_Field) {
     fmt.println()
 }
 
-
-/*
-    skip parsing an object or array, recursively
-        not worth it
-        requires too much of the existing logic, and the parts that aren't needed will already be skipped anyhow. 
-        
-    this would be far more simple if we had pre-parsed the tokens and verified correctness of the file at that level.   
-    Then we could just jump directly to the next token
-    
-    I had sort of planned to eventually move to pre-tokenizing the file, but had put it off 
-        because it works fine as is now and I'm working on more important features
-        because i wanted to try implementing custom parsing directives which take over parsing completely...
-        we could still implement those parsing directives into the tokenizer, but then we need to be able to define custom token types
-    
-        also the question remains as to whether we should tokenize into tokens or fields
-*/
+format_field_address :: proc(sb: ^strings.Builder, field: ^SAX_Field) {
+    if field.parent != nil {
+        format_field_address(sb, field.parent)
+        strings.write_byte(sb, '/')
+    }
+    strings.write_string(sb, field.name)
+}
 
 
 SAX_parse_file :: proc(using ctxt: ^SAX_Parse_Context) -> bool {
@@ -116,6 +191,7 @@ SAX_parse_file :: proc(using ctxt: ^SAX_Parse_Context) -> bool {
         if b.field_path == "" {
             // an empty path means we are binding to the root of the file
             // we can only have one binding to the root of the file!
+            // TODO: we actually need to process this data binding like any other
             if root.data_binding == nil {
                 root.data_binding = b.binding
             } else {
@@ -147,7 +223,7 @@ SAX_parse_object :: proc(using ctxt: ^SAX_Parse_Context, parent: ^SAX_Field) -> 
         
         // read field name
         if parent == nil || parent.type != .ARRAY {
-            next_token_type, next_token = get_next_token(&file)
+            next_token_type, next_token = get_next_token(ctxt)
             #partial switch next_token_type {
                 case .EOF:
                     return true
@@ -168,7 +244,7 @@ SAX_parse_object :: proc(using ctxt: ^SAX_Parse_Context, parent: ^SAX_Field) -> 
         }
 
         // read field value and append
-        next_token_type, next_token = get_next_token(&file)
+        next_token_type, next_token = get_next_token(ctxt)
         #partial switch next_token_type {
             case .STRING:
                 field.type = .FIELD
@@ -189,34 +265,35 @@ SAX_parse_object :: proc(using ctxt: ^SAX_Parse_Context, parent: ^SAX_Field) -> 
         }
         
         event_result: SAX_Return_Code = .OK
-        if event_handler.field_read != nil {
-            event_result = event_handler.field_read(ctxt, &field)
-            if event_result == .ERROR do return false
+        for e in event_handler.field_read {
+            if e != nil {
+                event_result = e(ctxt, &field)
+                if event_result == .ERROR do return false
+            }
         }
         
         // If .SKIP_BINDING is returned from the field_read event, then the field will not receive any automatic data bindings whatsoever.
         // However, if the user sets the data binding manually in the callback, that data binding will still be processed.
         if event_result != .SKIP_BINDING {
-            L_Direct_Binding: {
-                for &b in data_bindings {
-                    // check that field address matched up to this point
-                    // also skip completed matches
-                    if b._path_depth < _field_depth || 
-                    len(b._field_path) <= _field_depth {
-                        continue
-                    }
+            // set direct data bindings
+            for &b in data_bindings {
+                // check that field address matched up to this point
+                // also skip completed matches
+                if b._path_depth < _field_depth || 
+                len(b._field_path) <= _field_depth {
+                    continue
+                }
     
-                    // check if _field_path[_field_depth] is a match
-                    if field.name != b._field_path[_field_depth] {
-                        continue
-                    }
-                    b._path_depth += 1
+                // check if _field_path[_field_depth] is a match
+                if field.name != b._field_path[_field_depth] {
+                    continue
+                }
+                b._path_depth += 1
     
-                    // check if we've matched the entire field address
-                    if len(b._field_path) == b._path_depth {
-                        b._path_depth = -1                  // deactivate the binding so that it will be skipped in future checks
-                        field.data_binding = b.binding      // set the data binding
-                    }
+                // check if we've matched the entire field address
+                if len(b._field_path) == b._path_depth {
+                    b._path_depth = -1                  // deactivate the binding so that it will be skipped in future checks
+                    field.data_binding = b.binding      // set the data binding
                 }
             }
             
@@ -225,9 +302,11 @@ SAX_parse_object :: proc(using ctxt: ^SAX_Parse_Context, parent: ^SAX_Field) -> 
             // check_for_indirect_bindings() could basically be a SAX_Event_Handler_Proc
             L_Indirect_Binding: if parent != nil && parent.data_binding != nil {
                 event_result: SAX_Return_Code = .OK;
-                if event_handler.indirect_data_binding != nil {
-                    event_result = event_handler.indirect_data_binding(ctxt, &field)
-                    if event_result == .ERROR do return false
+                for e in event_handler.indirect_data_binding {
+                    if e != nil {
+                        event_result = e(ctxt, &field)
+                        if event_result == .ERROR do return false
+                    }
                 }
                 
                 if event_result == .SKIP_BINDING {
@@ -278,6 +357,7 @@ SAX_parse_object :: proc(using ctxt: ^SAX_Parse_Context, parent: ^SAX_Field) -> 
     
                     case runtime.Type_Info_Array:
                         if .PARSE_ARRAY_INDEXED in parent.io_data.parse.flags {
+                            assert(parent.type == .OBJECT) // TODO
                             field.index = strconv.atoi(field.name)
                         }
                         
@@ -296,6 +376,7 @@ SAX_parse_object :: proc(using ctxt: ^SAX_Parse_Context, parent: ^SAX_Field) -> 
                         raw_slice := cast(^runtime.Raw_Slice) parent.data_binding.data
                         
                         if .PARSE_ARRAY_INDEXED in parent.io_data.parse.flags {
+                            assert(parent.type == .OBJECT) // TODO
                             field.index = strconv.atoi(field.name)
                         }
                         
@@ -350,18 +431,22 @@ SAX_parse_object :: proc(using ctxt: ^SAX_Parse_Context, parent: ^SAX_Field) -> 
             _field_depth += 1
 
             event_result: SAX_Return_Code = .OK;
-            if event_handler.object_begin != nil {
-                event_result = event_handler.object_begin(ctxt, &field)
-                if event_result == .ERROR do return false
+            for e in event_handler.object_begin {
+                if e != nil {
+                    event_result = e(ctxt, &field)
+                    if event_result == .ERROR do return false
+                }
             }
-
+            
             SAX_parse_object(ctxt, &field) or_return
 
-            if event_handler.object_end != nil {
-                event_result = event_handler.object_end(ctxt, &field)
-                if event_result == .ERROR do return false
+            for e in event_handler.object_end {
+                if e != nil {
+                    event_result = e(ctxt, &field)
+                    if event_result == .ERROR do return false
+                }
             }
-
+            
             _field_depth -= 1
 
             for &b in data_bindings {
@@ -385,14 +470,16 @@ SAX_parse_object :: proc(using ctxt: ^SAX_Parse_Context, parent: ^SAX_Field) -> 
 process_data_binding :: proc(using ctxt: ^SAX_Parse_Context, field: ^SAX_Field) -> bool {
     // handle data_binding event
     event_result: SAX_Return_Code = .OK;
-    if event_handler.data_binding != nil {
-        event_result = event_handler.data_binding(ctxt, field);
-        if event_result == .ERROR {
-            return false
-        }
-        if event_result == .SKIP_BINDING {
-            field.data_binding = {}
-            return true
+    for e in event_handler.data_binding {
+        if e != nil {
+            event_result = e(ctxt, field);
+            if event_result == .ERROR {
+                return false
+            }
+            if event_result == .SKIP_BINDING {
+                field.data_binding = {}
+                return true
+            }
         }
     }
     
@@ -410,112 +497,141 @@ process_data_binding :: proc(using ctxt: ^SAX_Parse_Context, field: ^SAX_Field) 
         return true
     }
     
+    // TODO: figure out if this is where this needs to be. I have a lot of these dumb todos just saying to check the order of operations now...
+    //       presumably, we want derefing any pointers to be the last thing we do before actaully setting a value through a data binding,
+    //       that way the user can see that it is in fact a pointer in the callback and do something about that if they want to.
+    field.data_binding, _ = deref_any_pointer(field.data_binding)
+    
     // TODO: convert to a switch on field type, handle invalid cases
     binding_ti := runtime.type_info_base(type_info_of(field.data_binding.id))
-    if field.type == .FIELD {
-        // restrict types to which we can bind a field
-        #partial switch tiv in binding_ti.variant {
-            case runtime.Type_Info_Integer:
-            case runtime.Type_Info_Float:
-            case runtime.Type_Info_Enum:
-            case runtime.Type_Info_String:
-            case runtime.Type_Info_Bit_Set:
-            case runtime.Type_Info_Boolean:
-            
-            // arrays of bytes/u8 are permitted as single-valued fields so that we can parse them as strings
-            case runtime.Type_Info_Array:
-                if tiv.elem.size != 1 {
-                    log("Unable to bind field \"%v\" to data of type: %v", field.name, field.data_binding.id)
-                    print_field_address(field)
-                    return false
-                }
-            case runtime.Type_Info_Dynamic_Array:
-                if tiv.elem.size != 1 {
-                    log("Unable to bind field \"%v\" to data of type: %v", field.name, field.data_binding.id)
-                    print_field_address(field)
-                    return false
-                }
-            case runtime.Type_Info_Slice:
-                if tiv.elem.size != 1 {
-                    log("Unable to bind field \"%v\" to data of type: %v", field.name, field.data_binding.id)
-                    print_field_address(field)
-                    return false
-                }
+    #partial switch field.type {
+        case .FIELD:
+            // restrict types to which we can bind a field
+            #partial switch tiv in binding_ti.variant {
+                case runtime.Type_Info_Integer:
+                case runtime.Type_Info_Float:
+                case runtime.Type_Info_Enum:
+                case runtime.Type_Info_String:
+                case runtime.Type_Info_Boolean:
                 
-            case: 
-                log("Unable to bind field \"%v\" to data of type: %v", field.name, field.data_binding.id)
-                print_field_address(field)
-                return false
-        }
-        if !set_value_from_string(ctxt, field.data_binding, field.value) {
-            return false
-        }
-    }
-    else { // field type is either object or array
-        #partial switch tiv in binding_ti.variant {
-            case runtime.Type_Info_Array:
-            case runtime.Type_Info_Dynamic_Array:
-            case runtime.Type_Info_Slice:
-                // 
-            
-            case runtime.Type_Info_Bit_Set:
-                // assert(field.type) == .ARRAY
-            case runtime.Type_Info_Map:
-                // assert(field.type) == .OBJECT
-            
-            case runtime.Type_Info_Struct:
-                if .INIT in field.io_data.parse.flags {
-                    mem.set(field.data_binding.data, 0, binding_ti.size)
-                }
-                // if a struct is inside an object, then assign the gon object name to the struct name member
-                L_Get_Name_Member: {
-                    if field.parent.type != .OBJECT {
-                        break L_Get_Name_Member
+                case runtime.Type_Info_Bit_Set: 
+                    // check if paruent data binding is the same.
+                    if field.parent.data_binding.data != field.data_binding.data {
+                        sb := strings.builder_make(); defer strings.builder_destroy(&sb)
+                        strings.write_string(&sb, "Error on field '")
+                        format_field_address(&sb, field)
+                        strings.write_string(&sb, "': Bit sets must be expressed as GON arrays, not as single-valued fields.")
+                        log(strings.to_string(sb))
+                        return false
+                    }
+                
+                // arrays of bytes/u8 are permitted as single-valued fields so that we can parse them as strings
+                case runtime.Type_Info_Array:
+                    if tiv.elem.size != 1 {
+                        log("Unable to bind field \"%v\" to data of type: %v", field.name, field.data_binding.id)
+                        print_field_address(field)
+                        return false
+                    }
+                case runtime.Type_Info_Dynamic_Array:
+                    if tiv.elem.size != 1 {
+                        log("Unable to bind field \"%v\" to data of type: %v", field.name, field.data_binding.id)
+                        print_field_address(field)
+                        return false
+                    }
+                case runtime.Type_Info_Slice:
+                    if tiv.elem.size != 1 {
+                        log("Unable to bind field \"%v\" to data of type: %v", field.name, field.data_binding.id)
+                        print_field_address(field)
+                        return false
                     }
                     
-                    // TODO: this check should go elsewhere, probably up to the array cases above.
-                    // if .PARSE_AS_OBJECT not_in field.parent.io_data.parse.flags {
-                    //     break L_Get_Name_Member
-                    // }
+                case:
+                    log("Unable to bind field \"%v\" to data of type: %v", field.name, field.data_binding.id)
+                    print_field_address(field)
+                    return false
+            }
+            if !set_value_from_string(field.data_binding, field.value) {
+                return false
+            }
+            
+        case .ARRAY:
+            #partial switch tiv in binding_ti.variant {
+                case runtime.Type_Info_Array,
+                     runtime.Type_Info_Dynamic_Array,
+                     runtime.Type_Info_Slice:
+                    // maybe add some check to see if these are supposed to be parsed as indexed or something
+                    // In general, parsing is designed to be a bit more lax about accepting input, so long as it is valid GON
+                
+                case runtime.Type_Info_Bit_Set:
+                    if field.parent.data_binding.data == field.data_binding.data {
+                        sb := strings.builder_make(); defer strings.builder_destroy(&sb)
+                        strings.write_string(&sb, "Error on field '")
+                        format_field_address(&sb, field)
+                        strings.write_string(&sb, "': Bit sets cannot contain nested GON arrays, only bit values.")
+                        log(strings.to_string(sb))
+                        return false
+                    }
+                
+                case runtime.Type_Info_Struct:
+                    if .INIT in field.io_data.parse.flags {
+                        mem.set(field.data_binding.data, 0, binding_ti.size)
+                    }
+                
+                case:
+                    log("Unable to bind internal type '%v' to GON array.", field.data_binding.id)
+                    return false
+            }
+            
+        case .OBJECT:
+            #partial switch tiv in binding_ti.variant {
+                case runtime.Type_Info_Array:
+                case runtime.Type_Info_Dynamic_Array:
+                case runtime.Type_Info_Slice:
+                    // maybe add some check to see if these are supposed to be parsed as indexed or something
+            
+                case runtime.Type_Info_Map:
+                    // no op
+            
+                case runtime.Type_Info_Struct:
+                    // This may not be necessary at all in Odin, since the only way this does anything is if the user passes in an object with some values already set. Because any memory allocated when expanding a dynamic array of strcuts will zero the memory (Unless we add the option of setting the allocator manually in the io data or something).
+                    // The other realistic use case is that the user actually has some custom init proc for this type, in which case we should just check the IO data for that.
+                    // But just zeroing the memory is probably doing nothing of value here since it is almost certainly already zeroed.
+                    if .INIT in field.io_data.parse.flags {
+                        mem.set(field.data_binding.data, 0, binding_ti.size)
+                    }
                     
                     // Currently, field.io_data only gets set right before calling into this procedure, 
                     // which means that this will necessarily be the same data as the io_data for the type specified in IO_Data_Lookup,
                     // UNLESS the user changed the io data in the data bind callback.
                     // This is probably something that we want to allow though, since if the user messes things up on their own, that's on them and I don't care so much.
                     
-                    // type_io_data, found := IO_Data_Lookup[field.data_binding.id]
-                    // if !found {
-                    //     log("Unable to parse named struct array, element type is '%v', but this struct type does not specify any IO data.", field.data_binding.id)
-                    //     return false
-                    // }
-                    
-                    if field.io_data.name_member == "" {
+                    if field.io_data.name_member != "" {
                         // Maybe we should have some kind of error here if parent is internally an array or map type?
                         // Doesn't really matter for an array, though it would be weird to have named objects in an array only for those names to be discarded.
                         // Especially for map, since we presumably need someone to take ownership of the string used for the key?
-                        // log("Unable to parse named struct, element type is '%v', but this struct type does not specify a name member in its IO data.", field.data_binding.id)
-                        break L_Get_Name_Member
+                        member := reflect.struct_field_by_name(field.data_binding.id, field.io_data.name_member)
+                        if member == {} {
+                            log("Unable to parse named struct, the type '%v' specifies an invalid name member '%v' in its IO data.", field.data_binding.id, field.io_data.name_member)
+                            return false
+                        }
+                        member_any := any {
+                            data = mem.ptr_offset(cast(^u8)field.data_binding.data, member.offset),
+                            id   = member.type.id,
+                        }
+                        if !set_value_from_string(member_any, field.name) {
+                            return false
+                        }
                     }
-                    
-                    member := reflect.struct_field_by_name(field.data_binding.id, field.io_data.name_member)
-                    if member == {} {
-                        log("Unable to parse named struct, the type '%v' specifies an invalid name member '%v' in its IO data.", field.data_binding.id, field.io_data.name_member)
-                        return false
-                    }
-                    
-                    member_any := any {
-                        data = mem.ptr_offset(cast(^u8)field.data_binding.data, member.offset),
-                        id   = member.type.id,
-                    }
-                    if !set_value_from_string(ctxt, member_any, field.name) {
-                        return false
-                    }
-                }
                 
-            case:
-                log("Unable to bind object or array to data of type: %v", field.data_binding.id)
-                return false
-        }
+                case:
+                    log("Unable to bind internal type '%v' to GON object.", field.data_binding.id)
+                    return false
+            }
+            
+        case .INVALID: fallthrough
+        case:
+            log("Invalid field passed to process_data_binding.")
+            return false
     }
     return true // ?
 }
@@ -524,19 +640,17 @@ process_data_binding :: proc(using ctxt: ^SAX_Parse_Context, field: ^SAX_Field) 
 /* 
     This single procedure is essentially our data interface layer.
     Implementation is language-specific.
-    
-    TODO: this doesn't need to be passed the parse context, and it probably shouldn't be.
+        
+    ## TODO
+        Remove log statements and log from caller on failure if need be.
+        Consider factoring out []u8-ish cases and passing this proc a string instead.
+            Then we can also have options there for whether or not to null-terminate.
+            Presumably, if we are writing a string into a buffer, we always want to null-terminate though...
 */
-set_value_from_string :: proc(using ctxt: ^SAX_Parse_Context, value: any, text: string) -> bool {
+set_value_from_string :: proc(value: any, text: string) -> bool {
     using runtime
-    if text == "" {
-        return true
-    }
-
-    ti := type_info_of(value.id)
-    if _, ok := ti.variant.(Type_Info_Named); ok {
-        ti = type_info_base(ti)
-    }
+    if text == "" do return true
+    ti := type_info_base(type_info_of(value.id))
 
     #partial switch &tiv in ti.variant {
         case Type_Info_Integer:
@@ -558,7 +672,7 @@ set_value_from_string :: proc(using ctxt: ^SAX_Parse_Context, value: any, text: 
                         case 1: (cast(^u8 )value.data)^ = auto_cast tiv.values[index]
                         case 2: (cast(^u16)value.data)^ = auto_cast tiv.values[index]
                         case 4: (cast(^u32)value.data)^ = auto_cast tiv.values[index]
-                        case 8: (cast(^u64)value.data)^ = auto_cast tiv.values[index]      
+                        case 8: (cast(^u64)value.data)^ = auto_cast tiv.values[index]
                     }
                     return true
                 }
@@ -619,11 +733,11 @@ set_value_from_string :: proc(using ctxt: ^SAX_Parse_Context, value: any, text: 
 
         case Type_Info_Array:
             if tiv.elem.size != 1 {
-                log("Unsupported type in set_value_from_string(): %v", value.id)
+                // log("Unsupported type in set_value_from_string(): %v", value.id)
                 return true
             }
             if len(text) >= tiv.count { // leave one byte pad on the end so we can null terminate
-                log("Unable to copy string of len %v to [%v]u8", len(text), tiv.count)
+                // log("Unable to copy string of len %v to [%v]u8", len(text), tiv.count)
                 return true
             }
             mem.copy(value.data, raw_data(text), len(text))
@@ -635,7 +749,7 @@ set_value_from_string :: proc(using ctxt: ^SAX_Parse_Context, value: any, text: 
             data       := slice.data
             elem_count := slice.len
             if tiv.elem.size != 1 {
-                log("Unsupported type in set_value_from_string(): %v", value.id)
+                // log("Unsupported type in set_value_from_string(): %v", value.id)
                 return false
             }
             (cast(^string)value.data)^ = strings.clone(text)
@@ -646,7 +760,7 @@ set_value_from_string :: proc(using ctxt: ^SAX_Parse_Context, value: any, text: 
             elem_count := array.len
             elem_ti    := runtime.type_info_base(tiv.elem)
             if elem_ti.size != 1 {
-                log("Unsupported type in set_value_from_string(): %v", value.id)
+                // log("Unsupported type in set_value_from_string(): %v", value.id)
                 return true
             }
             arr_u8 := transmute(^[dynamic]u8) array
@@ -655,7 +769,7 @@ set_value_from_string :: proc(using ctxt: ^SAX_Parse_Context, value: any, text: 
             return true
 
         case:
-            log("Unsupported type in set_value_from_string(): %v", value.id)
+            // log("Unsupported type in set_value_from_string(): %v", value.id)
             return true
     }
     
@@ -757,7 +871,8 @@ reserve_any_dynamic_array :: proc(array: any, capacity: int) -> bool {
 	return true
 }
 
-
+// I don't actually know what the rules are for alignment of elements within an array.
+// TODO: run some test with aligned structs to figure out what is needed here
 // get_size_with_align :: proc(size, align: int) -> int {
 //     if align == 0 do return size
     
@@ -768,3 +883,19 @@ reserve_any_dynamic_array :: proc(array: any, capacity: int) -> bool {
     
 //     return whole * align
 // }
+
+// second return value indicates that the any value was actually a pointer
+deref_any_pointer :: proc(value: any) -> (any, bool) {
+    ti := runtime.type_info_base(type_info_of(value.id))
+    ti_pointer, ok := ti.variant.(runtime.Type_Info_Pointer)
+    if ok {
+        ret := any {
+            id   = ti_pointer.elem.id,
+            data = (cast(^rawptr)value.data)^,
+        }
+        return ret, true
+    }
+    
+    // if the type is not a pointer, just return the original value
+    return value, false
+}
