@@ -50,4 +50,32 @@ get_next_token_json :: proc(json_tokenizer: ^json.Tokenizer) -> (Token_Type, str
     }
 }
 
+// JSON_Formatter :: struct {
+//     builder: strings.Builder,
+// }
+
+// format_token_json :: proc(serializer: Serializer, cmd: Format_Command, data: rawptr) -> bool {
+//     formatter := cast(^JSON_Formatter) data
+    
+//     switch cmd.type {
+//         case BEGIN_OBJECT:
+//             fmt.sbprintf(builder, "\"%v\": {%v", name, delim)
+            
+//         case END_OBJECT:
+//             fmt.sbprintf(builder, "}%v", delim)
+            
+//         case BEGIN_ARRAY:
+//             fmt.sbprintf(builder, "\"%v\": {%v", name, delim)
+            
+//         case END_ARRAY:
+//             fmt.sbprintf(builder, "]%v", delim)
+            
+//         case FORMAT_FIELD:
+//             // JSON is crap, requires commas after each field except on the last item in an object
+//             // We already handle this in GON, so we can handle it here, but when we do XML, we will probably just have to ignore the delim values passed... 
+//             // And we can't handle it in here because we don't know whether or not there are more objects to come.
+//             // we could also try to fix it in post, or hold onto each field and only print it after we know if soemthing comes next? bleh...
+//             fmt.sbprintf(builder, "\"%v\"%v", delim)
+//     }
+// }
 

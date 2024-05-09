@@ -8,24 +8,311 @@ In addition, it uses the reflection capabilities of the language to support a ve
 Data bindings provide a mapping from the fields in a GON file to the internal data types that your program uses. 
 In addition to the direct data bindings that the user defines, indirect bindings will be made recursively on structs and arrays automatically.
 
+## Philosophy
+
+While I am not generally a fan of text-based data formats, they certainly can be useful for certain applications where we want a file that can be read and editted by humans without the aid of anything more than a text editor.
+And while we could certainly have a more simple format for definining key/value pairs in a structurally flat way with less code, I think the ability to structure data within a file int objects and arrays provides a great deal of utility for relatively low complexity cost.
+
+Many of the additional features I have added to the library over time are arguably unnecessary / not worth the complexity cost, so I have worked to structure the code such that you do not have to enable those features if you do not want them.
+
+
+## Specification
+
+### Overview
+
+The GON format is basically identical to JSON in structure, but there are some important differences in syntax.
+
+Names of fields, objects, and arrays do not need to be enclosed in quotes.
+String values do not need to be enclosed in quotes, generally speaking.
+Commas are purely an aesthetic choice, they are treated internally as whitespace.
+Colons are not used.
+    In JSON, a colon is required between a field's name and its value.
+    In GON, this is not required because of how we parse key/value by alternating between reading a key and then a value.
+    There is no ambiguity in the structure of the file, so the colon is totally superfluous.
+    
+The result of these syntax changes is the removal of a great deal of visual clutter that makes JSON a pain for the human eye to parse.
+
+
+Two types of string values: quoted and unquoted
+    Strings may be enclosed in single quotes, double quotes, or backtick quotes.
+    Unquoted strings may only contain alphanumeric characters, underscore, and dash (minus sign).
+
+These differences stem from the fact that GON is intended primarily for use with statically typed languages, rather than dynamically typed ones.
+Whereas JSON needs some internal understanding of what the data type of a value is, GON makes no such distinction because the data type will be determined by the internal destination type.
+We are simply interpreting a string to have some internal value, but there are no "data types" embedded into the markup itself.
+What's interesting here to me, from a sort of design perspective is that by having strong types in the language itself, we save ourselves a lot of work in the markup, because we actually don't need to be so explicit there.
+Because our internal data types are well-defined, we are given more freedom overall about how we express our data.
+Parsing also becomes simplified by the more minimal syntax, which gives us the capacity to extend the format in interesting ways.
+
+
+### File Structure
+
+
+
+
+
+### Strings and Quotes
+
+In GON, we are very aware of the fact that everything in a text file is a string, and we don't pretend that some strings are actually numbers just because they're only made up of digits and don't have quotes around them.
+So, the value member of a GON field is always just a string, and we don't interpret the content of that string until we know the type of the data we have a data binding to.
+
+But, we also don't want to have quotes all over the file unnecessarily, so there is a minor syntactic difference between how we interpret strings that are quoted and those that are unquoted.
+
+Historically, the parser has been very lax about strings, but as I've used the it more in my own projects, I've become more uncomfortable with some of the ambiguities and odd rules. I realized that we need to have some more well-defined specification for what can and cannot be in an unquoted string, and for what escape sequences we recognize.
+
+Originally, the only difference was that unquoted strings could not contain spaces, but upon developing this parser further, 
+So for example, you could have an unquoted string value like `a"real1y\uglystring;*"202-\`
+The quotation marks inside the string would just be parsed like anyother non-whitespace character, which is obviously really weird and bad.
+
+I still want to keep things as flexible and simple as possible though, but also allow things to be practical.
+So the goal here is just to have a reasonable standard, given how I have actually used GON in practice.
+
+So now, any unquoted strings must follow the standard rules of identifiers in C-like languages.
+That is, they can only contain alphanumeric characters and underscore.
+This is because in practice the names are almost exclusively used to match against the identifiers of struct members or other constructs that follow the smae rules for identifiers (enum value names)
+The only minor caveat compared to C identifiers is that unquoted strings beginning with numeric characters are not treated any differently. (again, we don't differentiate numbers from strings)
+
+If the user really desires to do so, they can trivially modify the tokenizer to allow for different charcters to be in unquoted strings.
+I am just restricting the subset of allowed characters as much as possible for now so that I have some freedom to potentially add extra syntax constructs in the future.
+    It is relatively unlikely that I actually will add such additional syntax (again, wanting to keep things as simple as possible), but I have considered doing so for the purpose of embedding binary data into a file 
+
+Also, it is important to note that a field name may still be a quoted string, allowing you to put any characters you desire inside the field name.
+I use this for map[string] T types where the key value is used as the field / object name
+
+
+NOTES TO SELF on string types and identifiers
+
+as it turns out it may be helpful to treat strings / identifiers / numbers
+still, these will probably all be treated the same when it comes time to convert them into soem internal value( that is, they will all be treated as strings)
+but when constructing the dom or parsing a node, it will probably be useful to know the particular token type
+
+tokenizing in this way will probably also be nicer if people want to have some kind of syntax highlighting on their gon files, since we could color different data types differently
+
+
+
+knowing whether a token is an identifier or a string could be useful for enumerated arrays
+    side note: would we even be able to do enumerated arrays in jai?
+        would require a custom data type like in odin, or some way to resolve enum identifier as an int
+            second solution sounds like a lot of complication for little benefit
+
+I know I had more of a solid reason why this would be good but I cannot remember it for the life of me at the moment...
+
+I think maybe it was this?:
+we can precheck the types of values somewhat before actually doing any data assignments
+    can see if an array of type int contains strings, error before doing any allocations
+
+
+
+
+## Comparing SAX and DOM for Parsing and Serialization
+
+While I could continue to keep the parser entirely SAX-based, doing so is beginning to make the addition of certain features much more complicated. 
+Whether these features are truly necessary is a matter of opinion.
+
+We could just say: "We value the simplicity of it being SAX-style so much that we just won't add any additional features that would add undue complexity."
+
+but people will want to have nice features, including me, because it'll help get other real work done.
+Part of the complexity of adding these things comes fromt he fact that I am still trying to do so in the SAX paradigm.
+
+And ultimately, using a DOM will ultimately simplify the code overall (when including the advanced features) because those features won't have to be tacked on weirdly. 
+the DOM is just more manipulatable and better fits the shape fo the problem of serializing a file like this
+And despite the fact that we will now need and IR, the final implementation may be faster overall too, since we are removing the necessity to build external structures on top of the parser to do the things we want to do with our data.
+    e.g. references between fields, and such
+    
+part of the original idea of making everything be SAX was to remove the IR of a DOM and go directly from the text of the file to our internal data
+in a SAX parser, basically all structure is baked into the parsing procedure, so the context you have for any given field only includes its ancestor fields
+you can get a bit of additional context by further investigating the data bindings of the parent fields, but you never have access to the overall structure of the file, since it hasn't been fully parsed yet.
+For a long time, that extra context seemed unnecessary, since the data I was loading was very simple (primarily in that there are no real relationships to consider between data in the same file)
+Using the parser in practice, I encountered situations where I wanted more context, or the ability to look ahead and grab information more nonlinearly.
+
+
+Reading over a file and pulling out the data we see is inherently a very linear task, and so the SAX paradigm will get you quite far. Most of the functionality one would desire for very low complexity cost.
+    We are taking a linear stream of data and storing it non-linearly to various places in memory.
+
+But for serialization, the lack of an IR makes things much more complicated, specifically if we want to be able to mix direct and indirect data bindings in the same way that we can when parsing.
+    We are taking many disparate data sources and trying to serialize them linearly to a file.
+        And the order often matters, (in the case of XML, the order/formatting is conditional on several factors).
+    
+So, if we create this IR because we need it in order to greatly simplify the procedure for serialization, it becomes more of a question whether we should just go ahead and use the same IR for parsing.
+If we used the IR for parsing, we are now enabled to look ahead and get more context about the file/fields.
+We don't need to change the interface for data bindings at all.
+We can still extend the parser's functionality through callbacks that operate almost the same as they did for the SAX parser, but again with more powerful options available.
+
+If we want to convert from one format to another, we can skip the internal data format completely and parse/serialize using only the IR
+Though whether we would want to do this in practice is up for debate, since we probably want to reformat values/structs differently in different formats
+
+Performance characteristics:
+The IR is still relatively lightweight, since it does not do stupid string copies/allocations, and just refers to the source text.
+The biggest part of each node is just pointers to other nodes, so the structure dwarfs the actual content.
+    This is quite unfortunate, but could potentially be remediated in the future using relative pointers or indexes instead of normal pointers.
+    We can use the same interface for inserting/navigating nodes while improving the backing implementation over time.
+
+why the intial implementation for DOM nodes uses regular pointers:
+    most straightforward to implement and for user to manipulate manually
+    For small files, one could generate the entire IR in temporary storage and then reset the high water mark afterwards
+    if we are allocating with temp storage, its actually better to use individual allocations than to use dynamic arrays
+        if we need to add more during runtime (which we will if we add data bindings dynamically)
+            then we won't need to realloc dynamic array and move nodes. 
+            I dont know exactly how dynamic arrays work with temp storage, but I can assume that if anyhting has been temp alloced after the dynamic array was initially created and appended to, then we will have to realloc upon reaching capacity.
+                which would lead to much higher usage to temp storage than we would have if we just alloc individual nodes
+        nodes will still probably be mostly linear in memory, since the vast majority will be allocated sequentially
+
+
+## Very Much Speculative Ideas
+
+### Comments with tilde
+
+```
+~ a comment using tilde, how do we feel about this?
+object {
+    number 35                   ~ it feels very minimal, maybe not as attention grabbing as #
+    string "this is a string"
+    
+    ~ and would have to consider whether some people will have a harder time hitting tilde key 
+    ~ as opposed to # if they use other keyboard layouts...
+}
+```
+
+The main reason I am considering using tilde for comments is so that I can use # for field index.
+Also maybe a tiny bit of spite for Python.
+
+Maybe we also have lexical comments/notes on fields?
+could be used for versioning?
+    versioning mostly doesnt matter in a textual format, we kind of either have a field with a given name or not
+    so probably nah
+
+
+### Attribute Note
+
+'@' token flags a field as an attribute
+
+would allow GON to express when a field on an object should be interpreted as an attribute
+This would only be relevant in terms of preserving information from an XML file that is converted to GON.
+It would have no impact on the normal functionality of the GON parser, but it would set a flag on the field that the user can see.
+It would also allow us to convert directly to/from gon/xml using only the IR, without the need to actually store the file data in some strongly-typed internal format
+I would also maybe use this to convert gon into HTML, could be interesting
+
+```
+p {
+    @ color "red"
+    @ class "error"
+    innerHTML "404: The requested content could not found."
+}
+```
+
+encountering this token would require that the next field parsed is in fact a .FIELD, since have an object or array as attribute would make no sense.
+
+
+#### Parsing Directives
+
+! directive_name
+
+overrides parsing at the level of tokenization and eneters a user callback to handle the data stream
+when the callback returns, the tokenizer will pick back up where it left off, with whatever state it was in or whatever state the user has modified.
+
+This should probably be used very springly, but I think it may serve some purpose for small projects / files that are for internal use only
+definitely not something you would want to include in a file that is being sent to a third party, since they won't know what it means
+
+for myself, it would be ideal for doing some basic expression parsing, so that we can have values based off of other values
+
+
+### Field references
+
+#### Possible syntax
+
+* "field/path"
+    gets the data binding of another field in the file
+    could be used to assign values to pointer types, with type checking also
+    do want want to allow introspecting into the data binding to pull out nested data?
+
+$ "field/path"
+    gets the value of another field in the file.
+    basically redirects a data binding to use a different field path. 
+    this would almost certainly create multiple bindings to the same field.
+        can be reconciled with DOM parsing
+            doesn't need to actually create a data binding, just needs to grab a value from another node
+
+& "field/path"
+    gets the index of another field in the file.
+    could use this syntax in a field path to insert into an array?
+
+#### Prerequisites
+
+DOM-based parsing
+dynamically creating/modifying direct data bindings while parsing
+
+#### Example Usage
+
+We have some people in a file, and we want to store the best friend of an individual person.
+Internally, we store these references by index or pointer rather than by name string, since we don't like using hash maps where they're not needed.
+But in the file, its much nicer to specify best_friend by name.
+
+```
+people [
+    Wilma  { ... }
+
+    Greg {
+        ...
+        best_friend &"../Fred"
+    }
+    
+    Lucy   { ... }
+    
+    Fred   { ... }
+    
+    Julian { ... }
+]
+```
+
+I've avoided the idea of adding new direct data bindings while the parser is running because originally I did not use a dynamic array for them, only a slice. But now that the API has changed so that data bindings are provided by strings, and we're splitting the strings up and allocating slices for them and dynamically appending bindings and all that jazz, what reason do we have to not just add new data bindings dynamically?
+
+#### In Serialization
+
+Will be tricky to implement, even with DOM
+
+how do we generate the path to use?
+if by pointer, do we just search data bindings for matching pointer value?
+    then we can compare the two bindings paths and generate a relative path from A to B
+if by index, 
+    need to record array source index when inserting node
+    that way references to this index can be resolved, because node index in file structure may not match orig array index (is this true? or will they necessarily match?)
+
+probably will just have to track all references that we need to generate and resolve them after all data bindings have been registered.
+    but this is complicated by indirect bindings. 
+    I suppose when we serialize we just generate all nodes for indirect bindings when the direct binding node is inserted.
+    so then we will at least have all nodes inserted before we need to resolve references.
+
 
 ## ToDo
 
-serialization of objects through pointers
+parsing of objects through pointers
+    pretty sure we have this now, no settings to enable/disable though, which is not ok.
+    need to work on the below item about managing allocations for pointers/slices
 
+we need a better standard for 
+    what characters are permissible in an unquoted string
+        alphanumeric, underscore
+    what characters can be/must be escaped
+        quotes and backslash itself
 
-
+in a field path string, how to specify quoted string names?
+    root / objects / "object 1" / thing
+    whitespace is ignored
+    idents still separated by slash
+    can parse quoted strings in the same way as is done in parsing
 
 ### Parsing
 
 special handling for polymorphic structs based on their base struct type 
     performing this comparison automatically would mean iterating over all of the types in io_data_lookup
         could create a second lookup specifically for polymorphic types
+            not doable in Odin
     better solution would be to implement a dynamic array for storing "default callbacks"
         these default callbacks would be automatically appended in the parse context unless the caller opts out
         still need to be able to have multiple callbacks in general...
         then we can just proviude a sample callback for matching on polymorphic base type and allow user to implement extra logic as desired
-
+            implemented this, basically sucks in Odin, but works
+            
 prevent multiple bindings to the same field?
     We should probably do this because:
         while multi-bindings on simple fields don't pose any issues, the same cannot be said for objects and arrays
@@ -106,6 +393,7 @@ Implemented serialization of map[string] T types
     the need for this, at least for me, is mostly assuaged by the already implemented support for indexed arrays
 
 Implement parsing and serialization of enumerated arrays
+    done
 
 serialize to a nested path
     this will require totally rewriting the serialization procedure to be more non-linear
@@ -150,6 +438,10 @@ mapped_serialize
     serialize fields based on a set of data bindings, more like a reversed version of the parsing procedure
     may need to generate a basic DOM for structure?
     
+use of struct member tags has been largely dropped in favor of specifying data in the IO_Data structure for a type.
+Perhaps in Jai we can have some comptime helper function to allow more easily defining things through tags and then converting that to IO_Data automatically.
+
+
 
                      
 ## Callback Events
@@ -166,7 +458,6 @@ This section will briefly describe the purpose of each event and some standard u
 While the parser handles basic data types and strucutres very well, it of course cannot natively handle any complex data structure you throw at it.
 This library is meant to be one that the user is expected to understand relatively thoroughly so that they can extend its functionality for their specific needs.
 Nothing in the library is designated as private or hidden from the user, since even the utility functions are intended to be of use to the user in writing callback code.
-
 
 The general structure of most of my callbacks tends to be something like this:
     check the contents of the field to match against certain data types, values, or patterns.
@@ -208,16 +499,24 @@ Things you may want to do:
 
 ### data_binding
 
-This event occurs when a field is fully formed and is 
-
+This event occurs right before the field's value is parsed and assigned to whatever data it is bound to.
+At this point, we can't explicitly/contextually tell whether the data binding was made directly or indirectly, though you could figure out by doing some work of your own.
+The user can read the data binding here and re-assign the binding, skip the binding, or handle the binding manually in the callback if necessary.
 
 ### indirect_data_binding
 
+Occurs when a fields' parent has a data binding. This runs before we have even determined that the parent data binding will result in an indirect binding will actually be made to the current field.
+Typically, this is where you would implement code to handle custom data structures, e.g. a linked list where we can create the data binding for sub-elements manualyl and then pass those bindings back to the parser.
+
 ### object_begin
+
+run before recursing into an object or array
+can be used to initialize a complex object type before making data bindings to elements
 
 ### object_end
 
-
+run after recursing from an object or array
+could be used to finalize a complex object after all data bindings to elements have completed
 
 
 
@@ -296,7 +595,7 @@ in parsing:
     we parse over the tokens/fields and run callbacks, process data bindings
 
 in serialization:
-    I was not sure whatto do about serialization for quite a while, but I think I may now have some kind of idea
+    I was not sure what to do about serialization for quite a while, but I think I may now have some kind of idea
     basically just do the parsing process in reverse
     
     read over the data we want to serialize and emit tokens from the data
@@ -314,10 +613,6 @@ in serialization:
             would also handle concerns of nested data bindings, which is a biggie
             but there will also be certain rules that would only apply for specific languages...
                 who gives hints to who, who is authoritative?
-    
-
-
-
 
 
 
@@ -368,11 +663,5 @@ As it stands now, callbacks have access to all information that the SAX parser i
     The user could very easily screw up parsing by manipulating various things in the parse_context
     But I do not really want to reduce the power of the callbacks due to this.
     peope should simply not write code that will introduce bugs, the parser is simple enough and following some very basic conventions should prevent bugs from arising
-
-
-
-
-
-
 
 

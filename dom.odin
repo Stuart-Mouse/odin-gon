@@ -11,8 +11,10 @@ DOM_File :: struct {
 
 DOM_Field :: struct {
     parent   : int,
-    name     : string, 
+    name     : string,
     type     : Field_Type,
+    
+    // maybe make a raw union?
     value    : string,
     children : [dynamic]int,
 }

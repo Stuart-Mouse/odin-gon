@@ -30,7 +30,6 @@ log_stub :: proc(format: string, args: ..any, loc := #caller_location) { }
     So the parse_file proc should probably be responsible for making sure that things such as the log proc are set validly.
 */
 
-
 whitespace_chars :: " ,\t\r\n\x00"
 reserved_chars   :: "#{}[]\""
 whitespace_and_reserved_chars :: " ,\t\r\n#{}[]\"\x00"
@@ -50,6 +49,8 @@ Field_Type :: enum {
     FIELD   = 1,
     OBJECT  = 2, 
     ARRAY   = 3,
+    // maybe add ATTRIBUTE type? would be implicitly convertible to FIELD during parsing, could add formatting options specific to 
+    // parsing in attributes is more straightforward. serializing them out to XML is where things get less nice.
 }
 
 // print_all_tokens :: proc(file: string) {
@@ -72,7 +73,7 @@ Field_Type :: enum {
 //     fmt.println()
 // }
 
-get_next_token :: proc(ctxt: ^SAX_Parse_Context) -> (Token_Type, string) {
+get_next_token :: proc(ctxt: ^Parser) -> (Token_Type, string) {
     switch ctxt.tokenizer.type {
         case .GON:
             return get_next_token_gon(&ctxt.tokenizer.gon.file)
@@ -173,7 +174,7 @@ skip_whitespace_and_comments :: proc(file: ^string) -> bool {
 
 // only " and \ need to be escaped
 is_escaped_char :: proc(char: u8) -> bool {
-  return char == '\\' || char == '\"'
+    return char == '\\' || char == '\"'
 }
 
 to_conformant_string :: proc(s: string, force_quotes := false, allocator := context.allocator) -> string {
@@ -200,6 +201,13 @@ to_conformant_string :: proc(s: string, force_quotes := false, allocator := cont
 }
 
 // TODO: unescape_string()
+
+
+type_has_custom_serialization_proc :: proc(type: typeid) -> bool {
+    type_io_data, found := IO_Data_Lookup[type]
+    if !found do return false
+    return type_io_data.serialize.to_string_proc != nil
+}
 
 /*
   Trying to just get a quick and dirty solution done, so there are some things done very inefficiently.
@@ -242,7 +250,7 @@ serialize_any :: proc(
             strings.write_string(sb, " ");
         }
         
-        fmt.sbprintf(sb, "%v", to_conformant_string(x_value))
+        fmt.sbprintf(sb, "%v", to_conformant_string(x_value, force_quotes = true))
         
         delim := delim != "" ? delim : "\n" 
         strings.write_string(sb, delim)
@@ -279,7 +287,7 @@ serialize_any :: proc(
                     id   = type.id,
                 }
                 
-                // We have to figure out the delim on every frame so that we don't write
+                // We have to figure out the delim on every iteration so that we don't write
                 //   a comma after the last element when fields are all on one line.
                 // member_delim := type_io_data.serialize.member_delim
                 // if member_delim == "" {
@@ -405,7 +413,12 @@ serialize_any :: proc(
                 
                 elem_name: string
                 if as_indexed do elem_name = fmt.tprint(i)
-                // TODO: as_object 
+                if as_object {
+                    // TODO: implement normal case to get struct name member
+                    if type_has_custom_serialization_proc(elem_any.id) {
+                        elem_name = " "
+                    }
+                }
                 
                 elem_flags: Serialization_Flags
                 if .SKIP_ELEMS_IF_EMPTY in flags {
@@ -754,7 +767,7 @@ Parse_Flag :: enum {
 Parse_Settings :: struct {
     flags      : Parse_Flags,
 
-    parse_proc : proc(^SAX_Parse_Context, ^SAX_Field) -> SAX_Return_Code
+    parse_proc : proc(^Parser, ^SAX_Field) -> SAX_Return_Code
     // init_proc  : proc(rawptr) -> bool // TODO
 }
 
@@ -786,10 +799,6 @@ get_io_data :: proc(type: typeid) -> (^IO_Data, bool) {
 register_io_data :: proc(type: typeid, io_data: IO_Data) {
     IO_Data_Lookup[type] = io_data
 }
-
-
-
-
 
 
 // Data_Mappings :: struct {

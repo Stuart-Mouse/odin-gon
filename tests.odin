@@ -303,7 +303,7 @@ _test_basics :: proc() {
     // test_struct: Test_Struct
 
     // // parsing the test_struct
-    // ctxt := SAX_Parse_Context {
+    // ctxt := Parser {
     //     file = file,
         
     // }
@@ -326,7 +326,7 @@ _test_basics :: proc() {
     
 //     file := ` string "this is a string" `
     
-//     ctxt := SAX_Parse_Context {
+//     ctxt := Parser {
 //         file = file,
 //         data_bindings = {
 //             { binding = dst,  field_path = "string" },
@@ -358,7 +358,7 @@ _test_basics :: proc() {
 //     90, 91, 92, 93, 94, 95, 96, 97, 98, 99
 // ]
 // `
-//     ctxt := SAX_Parse_Context {
+//     ctxt := Parser {
 //         file = file,
 //         data_bindings = {
 //             { binding = dst,  field_path = "array" },
