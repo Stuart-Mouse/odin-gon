@@ -21,6 +21,8 @@ Serializer :: struct {
     indent        : int,
     
     dom_root      : ^DOM_Node,
+    do_free_nodes : bool,
+    
     // event_handler : SAX_Event_Handler,
     log           : Log_Proc,
     
@@ -30,20 +32,28 @@ Serializer :: struct {
 
 // INTERFACE PROCEDURES
 
-init_serializer :: proc(serializer: ^Serializer, allocator := context.allocator) {
-    serializer.allocator = allocator
-    serializer.builder   = strings.builder_make()
-    serializer.dom_root  = new(DOM_Node, serializer.allocator)
-    serializer.dom_root^ = { 
-        name = "root",
-        type = .OBJECT,
+init_serializer :: proc(using serializer: ^Serializer, root: ^DOM_Node = nil, _allocator := context.allocator) {
+    allocator = allocator
+    builder   = strings.builder_make()
+    
+    if root != nil {
+        dom_root = root
+    } else {
+        dom_root  = new(DOM_Node, allocator)
+        dom_root^ = { 
+            name = "root",
+            type = .OBJECT,
+        }
+        do_free_nodes = true
     }
 }
 
 destroy_serializer :: proc(using serializer: ^Serializer) {
     strings.builder_destroy(&builder)
-    delete_child_nodes_recursive(dom_root)
-    free(dom_root)
+    if do_free_nodes {
+        delete_child_nodes_recursive(dom_root)
+        free(dom_root, allocator)
+    }
 }
 
 // serializes to the serializer's internal string builder
@@ -83,7 +93,7 @@ serialize_to_file :: proc(using serializer: ^Serializer, file_path: string) -> b
 }
 
 serializer_insert_data_binding :: proc(serializer: ^Serializer, path: string, binding: any, prepend := false) {
-    append_node_with_path(serializer.dom_root, path, binding, prepend)
+    append_data_node(serializer.dom_root, path, binding, prepend)
 }
 
 

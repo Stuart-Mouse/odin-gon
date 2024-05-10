@@ -16,6 +16,8 @@ import "core:math"
 
 INDENTATION_STRING := "    "
 
+// this struct is kinda big
+// maybe we optimize this later, but for now just making it work
 DOM_Node :: struct {
     parent       : ^DOM_Node, 
     next         : ^DOM_Node, 
@@ -189,11 +191,10 @@ append_nodes_for_indirect_bindings :: proc(node: ^DOM_Node, allocator := context
     }
 }
 
-append_data_node :: proc(parent: ^DOM_Node, name: string, data_binding: any, path: string = "",  prepend := false, allocator := context.allocator) ->  ^DOM_Node {    
-    node := append_child_node_with_path(parent, path, prepend, allocator)
+append_data_node :: proc(parent: ^DOM_Node, path: string, data_binding: any, prepend := false, allocator := context.allocator) ->  ^DOM_Node {    
+    node := append_node_with_path(parent, path, prepend, allocator)
     if node == nil do return node
     
-    node.name         = name
     node.data_binding = data_binding
     node.type = determine_node_type_for_serialization(node) // TODO: combine into one proc with the below indirect data bindings one below. maybe we just inline those here for now
     
@@ -206,7 +207,7 @@ append_data_node :: proc(parent: ^DOM_Node, name: string, data_binding: any, pat
 }
 
 // does the bare minimum to append a node, not even giving it a name
-// after the node is appended
+// after the node is appended, caller should initialize it
 append_child_node :: proc(parent: ^DOM_Node, prepend := false, allocator := context.allocator) ->  ^DOM_Node {
     node, err := new(DOM_Node, allocator)
     if err != nil do return nil // don't want to pass down the allocator error atm, maybe do this later
@@ -239,29 +240,40 @@ append_child_node :: proc(parent: ^DOM_Node, prepend := false, allocator := cont
     return node
 }
 
-append_child_node_with_path :: proc(parent: ^DOM_Node, path: string = "", prepend := false, allocator := context.allocator) -> ^DOM_Node {
+append_node_with_path :: proc(parent: ^DOM_Node, path: string = "", prepend := false, allocator := context.allocator) -> ^DOM_Node {
     path := path
     node := parent
     
-    for path != "" {
+    // empty path is not valid, reject it
+    if path == "" do return nil
+    
+    for {
         next, remaining, ok := get_next_ident_from_path_string(path)
         if !ok do return nil
         path = remaining
         
-        child := find_child_node_by_name(node, next)
-        if child != nil {
-            if child.type == .OBJECT {
+        if path != "" { 
+            // non-terminal node
+            // find if exists
+            child := find_child_node_by_name(node, next)
+            if child != nil {
+                if child.type != .OBJECT {
+                    return nil // error, we can't create a named subnode on an array or field type node
+                }
                 node = child
                 continue
-            } else {
-                return nil // error, we can't create a named subnode on an array or field type node
             }
+            // create if does not exist
+            node = append_child_node(node, prepend, allocator)
+            node.name = next
+            node.type = .OBJECT
+        } 
+        else { 
+            // terminal node
+            node = append_child_node(node, prepend, allocator)
+            node.name = next
+            break
         }
-        
-        node = append_child_node(node, next, prepend, allocator)
-        if path == "" do break
-        
-        
     }
     
     return node
@@ -441,81 +453,151 @@ determine_node_type_for_serialization :: proc(node: ^DOM_Node) -> Field_Type {
 */
 
 // used to build a DOM from a text file
-Tokenizer :: struct {    
-    data_bindings : [dynamic] Data_Binding,
-    log           : Log_Proc,
-    allocator     : runtime.Allocator,
+DOM_Parser :: struct {
+    file           : string,
+    dom_root       : ^DOM_Node,
+    data_bindings  : [dynamic] Data_Binding,
+    log            : Log_Proc,
+    allocator      : runtime.Allocator,
+}
+
+init_dom_parser :: proc(using parser: ^DOM_Parser, _file: string, _allocator := context.allocator) {
+    file      = _file
+    allocator = _allocator
+}
+
+add_data_binding_to_dom_parser :: proc(using parser: ^DOM_Parser, binding: any, path: string) {
+    append(&data_bindings, Data_Binding { 
+        binding    = binding, 
+        field_path = path,
+    })
+    // should we precheck that field path is valid? will still have to verify that there are no conflicts later on
+    // we will detect conflicts when actually creating the bindings to the DOM, since we can't just textually compare field paths trivially, and I don't want to do it that way anyhow
 }
 
 /*
     Steps in parsing:
     
-    read tokens and append all nodes
+    + read tokens and append all nodes
     insert data bindings into dom nodes
         check data type compatibility
-
+        run callbacks for walking dom similar to what we have in sax mode
+            problem: we don't actually walk the dom when inserting nodes
+            maybe we can walk it when we got to actually set all values for data bindings?
+            this should be totally fine so long as long as we dont have very sparse bindings in a file
+                we don't actually store the ^node back in the data binding, plus also indirect bindings, so really our only choice is to walk the dom for the final evaluation
+        if value uses field reference, save this and resolve later
+    resolve field references / data dependencies
+        it's possible there's a circular dependency in which case we should error
+        better to do this before setting any values, the idea is that every thing is correct before we start allocating
+    set data from text values of fields
 */
 
-construct_dom_from_file :: proc(using tokenizer: ^Tokenizer) -> (root: ^DOM_Node, success: bool) {
+construct_dom_from_gon_file :: proc(file: string) -> (root: ^DOM_Node) {
+    file := file
+
     next_token_type : Token_Type
     next_token      : string
     
-    root   := new(DOM_Node, allocator)
-    parent := root
+    root = new(DOM_Node)
+    root.name = "root"
+    root.type = .OBJECT
     
-    for parent != nil {
+    success = false
+    defer if !success {
+        delete_child_nodes_recursive(root)
+        free(root)
+    }
+    
+    parent := root
+    L_Loop: for parent != nil {
         name, text: string
+        type: Field_Type
         
         // read field name
         if parent.type != .ARRAY {
-            next_token_type, next_token = get_next_token(ctxt)
+            next_token_type, next_token = get_next_token_gon(&file)
             #partial switch next_token_type {
+                case .STRING: 
+                    name = next_token
                 case .EOF:
-                    return true
-                case .STRING:
-                    field.name = next_token
+                    if parent != root {
+                        return nil
+                    }
+                    break L_Loop
                 case .OBJECT_END:
                     if parent.type != .OBJECT {
-                        log("GON parse error: Unexpected %v token \"%v\".", next_token_type, next_token)
-                        return false
+                        // log("GON parse error: Unexpected %v token \"%v\".", next_token_type, next_token)
+                        return nil
                     }
                     parent = parent.parent
                     continue
                 case:
-                    log("GON parse error: Unexpected %v token \"%v\".", next_token_type, next_token)
-                    return false
+                    // log("GON parse error: Unexpected %v token \"%v\".", next_token_type, next_token)
+                    return nil
             }
-        } else {
-            field.name = fmt.tprintf("%v[%v]", field.parent.name, field.index)
         }
 
-        // read field value and append
-        next_token_type, next_token = get_next_token(ctxt)
+        // read field value
+        next_token_type, next_token = get_next_token_gon(&file)
         #partial switch next_token_type {
-            case .STRING:
-                field.type = .FIELD
-                field.value = next_token
-            case .OBJECT_BEGIN:
-                field.type = .OBJECT
-            case .ARRAY_BEGIN:
-                field.type = .ARRAY
+            case .STRING: 
+                type = .FIELD
+                text = next_token
+            case .OBJECT_BEGIN: 
+                type = .OBJECT
+            case .ARRAY_BEGIN: 
+                type = .ARRAY
             case .ARRAY_END:
-                if parent.type != .ARRAY {
-                    log("GON parse error: Unexpected %v token \"%v\".", next_token_type, next_token)
-                    return false
+                if type != .ARRAY {
+                    // log("GON parse error: Unexpected %v token \"%v\".", next_token_type, next_token)
+                    return nil
                 }
-                return true
+                parent = parent.parent
+                continue
             case:
-                log("GON parse error: Unexpected %v token \"%v\".", next_token_type, next_token)
-                return false
+                // log("GON parse error: Unexpected %v token \"%v\".", next_token_type, next_token)
+                return nil
         }
         
-        assert(field.type != .INVALID)
+        assert(type != .INVALID)
         
-        node := 
-        
-        if node.type == .OBJECT || field.
+        node := append_child_node(parent)
+        node.name = name
+        node.type = type
+        if node.type == .OBJECT || node.type == .ARRAY {
+            parent = node
+        } else {
+            node.text = text
+        }
     }
     
+    success = true
+    return root
+}
 
+add_data_bindings_to_nodes :: proc(using parser: ^DOM_Parser) -> bool {
+    for b in data_bindings {
+        node := find_node_by_path(b.field_path)
+        if node == nil do return false
+        
+        // check that node type is compatible with binding type
+        // for fields, do everything required to process a binding in sax, except dont actually set the value
+        // for array/oibject, do indirect bindings
+        // eventually, mark fields that use field references to be resolved later
+        
+        switch node.type {
+            case .FIELD:
+                
+                
+            case .OBJECT:
+                
+                
+            case .ARRAY:
+                
+                
+            case:
+                // invalid node type error?
+        }
+    }
 }
