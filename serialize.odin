@@ -33,7 +33,7 @@ Serializer :: struct {
 // INTERFACE PROCEDURES
 
 init_serializer :: proc(using serializer: ^Serializer, root: ^DOM_Node = nil, _allocator := context.allocator) {
-    allocator = allocator
+    allocator = _allocator
     builder   = strings.builder_make()
     
     if root != nil {

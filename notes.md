@@ -101,7 +101,10 @@ I think maybe it was this?:
 we can precheck the types of values somewhat before actually doing any data assignments
     can see if an array of type int contains strings, error before doing any allocations
 
-
+This makes things a bit weird though because we don't actually hold on to token type in the constructed field, 
+so we sould have to store that additional information about both name and value token type, which is kinda sucky
+    on the other hand though, since everything is fundamentally a string, we don't *have* to consider this information at all times when we need a field name or value
+    but it still takes up more space in each node, which are is already kind of a large struct. 
 
 
 ## Comparing SAX and DOM for Parsing and Serialization
@@ -159,6 +162,15 @@ why the intial implementation for DOM nodes uses regular pointers:
 
 
 ## Very Much Speculative Ideas
+
+### Expressions with ()
+
+### some token for "load binary data from this file"
+
+both of the above are at the point where we are basically turning this into almost more of a scripting language than a data format
+some aspects of this would work really nice with lead sheets, since that is basically similar to my gon parser in some structural ways, except that it is more about expression parsing and less about defining data
+maybe we can kind of marry the two
+but the goal should never become making a new language, only plugging in data and some dynamic procedure into odin/jai
 
 ### Comments with tilde
 

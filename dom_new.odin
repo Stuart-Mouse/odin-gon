@@ -23,14 +23,19 @@ DOM_Node :: struct {
     next         : ^DOM_Node, 
     prev         : ^DOM_Node, 
 
+    // source_location: struct { line, char: int },
+
     name         : string,
+    // name_token_type: string,
     type         : Field_Type,
     data_binding : any,
     flags        : enum { SAME_LINE },
     
+    
     // value is text for .FIELD, value is children for .OBJECT and .ARRAY
     using value: struct #raw_union {
         text : string,
+        // text_token_type: string, 
         using children: struct { 
             first : ^DOM_Node,
             last  : ^DOM_Node,
@@ -78,7 +83,7 @@ delete_child_nodes_recursive :: proc(node: ^DOM_Node) {
 find_node_by_path :: proc(node: ^DOM_Node, path: string) -> ^DOM_Node {
     path := path
     node := node
-    for path != "" {
+    for path != "" && node != nil {
         next, remaining, ok := get_next_ident_from_path_string(path)
         if !ok do return nil
         path = remaining
@@ -481,29 +486,94 @@ add_data_binding_to_dom_parser :: proc(using parser: ^DOM_Parser, binding: any, 
     + read tokens and append all nodes
     insert data bindings into dom nodes
         check data type compatibility
-        run callbacks for walking dom similar to what we have in sax mode
-            problem: we don't actually walk the dom when inserting nodes
-            maybe we can walk it when we got to actually set all values for data bindings?
-            this should be totally fine so long as long as we dont have very sparse bindings in a file
-                we don't actually store the ^node back in the data binding, plus also indirect bindings, so really our only choice is to walk the dom for the final evaluation
+        maybe we should actually go ahead and set any data binding values that we can while we are here?
+            because we already have to allocate space for values in dynamic arrays and such so that we can create all the indirect bindings to child nodes
+            it doesn't necessarily matter that we check everything before making any allocations, so long as we keep a list of the allocations we make so that we can free everything when an error occurs
+                but that list itself will require more allocations, albeit temporary ones
+            one way we could maybe reduce the size of the dom node struct is to store a *node in the data binding instead of duplicating the binding data in the node
+                this would acutally use less memory overall anyhow, since the node has to store pointer + typeid for the binding
+                the inconvenience here maybe is that we can't walk the dom and see the bindings, we would have to linear search the bindings array for a match to the current node
+                    which could possibly be bad for callbacks that want to do things with the dom nodes? if we even do that...
+                this would also allow for having multiple bindings to the same node, which could be fine/useful even
+                    e.g. two entity templates bind to the same base template object and then also bind to individual objects that override particular members
+                        seems like kind of a weird meta solution that just takes advantage of how the parser is structured
+                        this could also be acheived in gon syntax with field refs, probably
+                            just opens up the can of worms of $ working on objects
+                we could store any field ref for data dependency on the binding as well
+                one major problem is that if we aren't walking the dom in order to visit nodes, 
+                    resolving data dependencies becomes far more complicated because we have to worry about 
+                    ok, so maybe this is actually a reason that we want to perform all allocations before setting any data, 
+            short answer, no because of field ref evaluation
         if value uses field reference, save this and resolve later
     resolve field references / data dependencies
         it's possible there's a circular dependency in which case we should error
         better to do this before setting any values, the idea is that every thing is correct before we start allocating
+            moot point, we have to allocate in order to make the indirect data data bindings earlier in the process
     set data from text values of fields
+        run callbacks when walking dom similar to what we have in sax mode
+    
+    the issue of field refs
+    
+    i want a gon file to be totally statically defined such that the order of evaluation of the data bindings in the file does not matter
+    or well, i dont actually know, but we need to have a well defined answer for the order of evaluation here if there are going to be data dependencies between fields
+    
+    and the answer will depend on whether we decied to finalize data bindings by walking the dom in order or by following the order in which data bindings are appended.
+    also on what is the procedure for resolving individual data dependencies 
+    
+    orig plan to resolve a field ref is to just jump to a field in the dom when referenced and try to get the value needed from it
+        if that node then needs to be resolved, then we just jump to the next node and repeat
+        will have to pass orig node so that we know when we hit a circular dependency
+        this jumping between nodes will require that we have space already allocated for the values produced by resolving some node
+            not for the * and & refs, but for $ refs, unless we restrict that $ is only used to reference simple fields
+            if we allow $ to be used with object / array types, that's really what creates the entire issue here,
+                because then we are reliant on everything within that object being resolved, which is where we could hit weird ordering issues
+        if this process is completely nonlinear, then maybe it doesn't matter if the data binding process is linear?
+    
+    if we want to be able to jump around the file to resolve field refs, then we need all the data bindings to be in place first
+    so we do at least need to have the separation between the step of putting the bindings on the fields and actually processing the bindings
+    
+    we will need to set a flag on nodes when data binding has been resolved, or just remove the binding data from the node
+        otherwise, we could repeat work on an already processed node that we had previously jumped to as a field ref
+    
+    how to handle field refs structurally in dom node?
+    if something uses a ref, we don't actually know the type of the node yet
+    maybe we consider this its own type? 
+    still havent figured out syntax for object/array that uses field ref
+        for objects, would be nice to do field ref + more data
+            if we do that though, we run into a question of whether or not to deep copy or shallow copy structures
+        getting field ref from an array doesn't really seem to make any sense
+            then again, e.g. the animation frames arrays for entity templates, where I wanted to do 
+                shallow copy of walk to jump and fall
+                deep copy of green koopa with offsets added to frames
+
+    
 */
 
-construct_dom_from_gon_file :: proc(file: string) -> (root: ^DOM_Node) {
+process_node_bindings :: proc(using parser: ^DOM_Parser, node: ^DOM_Node) -> bool {
+    for child := node.first; child != nil; child = child.next {
+        if child.type == .OBJECT || child.type == .ARRAY {
+            process_node_bindings(parser, child)
+        } else {
+            // TODO: insert handling for field refs here
+            if !set_value_from_string(child.data_binding, child.text) {
+                return false
+            }
+        }
+    }
+    return true
+}
+
+construct_dom_from_gon_file :: proc(file: string) -> (^DOM_Node) {
     file := file
 
     next_token_type : Token_Type
     next_token      : string
     
-    root = new(DOM_Node)
+    root := new(DOM_Node)
     root.name = "root"
     root.type = .OBJECT
     
-    success = false
+    success := false
     defer if !success {
         delete_child_nodes_recursive(root)
         free(root)
@@ -549,7 +619,7 @@ construct_dom_from_gon_file :: proc(file: string) -> (root: ^DOM_Node) {
             case .ARRAY_BEGIN: 
                 type = .ARRAY
             case .ARRAY_END:
-                if type != .ARRAY {
+                if parent.type != .ARRAY {
                     // log("GON parse error: Unexpected %v token \"%v\".", next_token_type, next_token)
                     return nil
                 }
@@ -576,28 +646,219 @@ construct_dom_from_gon_file :: proc(file: string) -> (root: ^DOM_Node) {
     return root
 }
 
+
+// check that node type is compatible with binding type
+// for fields, do everything required to process a binding in sax, except dont actually set the value
+// for array/oibject, do indirect bindings
+// eventually, mark fields that use field references to be resolved later
 add_data_bindings_to_nodes :: proc(using parser: ^DOM_Parser) -> bool {
     for b in data_bindings {
-        node := find_node_by_path(b.field_path)
-        if node == nil do return false
+        node := find_node_by_path(parser.dom_root, b.field_path)
+        if node == nil do continue // maybe add a facility to mark data bindings as required
         
-        // check that node type is compatible with binding type
-        // for fields, do everything required to process a binding in sax, except dont actually set the value
-        // for array/oibject, do indirect bindings
-        // eventually, mark fields that use field references to be resolved later
-        
-        switch node.type {
-            case .FIELD:
-                
-                
-            case .OBJECT:
-                
-                
-            case .ARRAY:
-                
-                
-            case:
-                // invalid node type error?
-        }
+        if !add_data_binding_to_node(node, b.binding) do return false
     }
+    
+    return true
+}
+
+add_data_binding_to_node :: proc(node: ^DOM_Node, binding: any) -> bool  {
+    if node == nil || binding.data == nil do return false
+
+    // binding, _ = deref_any_pointer(binding)
+    binding_ti := runtime.type_info_base(type_info_of(binding.id))
+    
+    if !is_binding_valid(node, binding) {
+        return false
+    }
+    node.data_binding = binding
+    
+    // fmt.println(node.data_binding, binding)
+    
+    // we use the same switch structure here as is used int is_binding_valid
+    // unless we will also use this is_binding_valid elsewhere, we should just do it all inline here
+    // make indirect bindings onto child nodes
+    #partial switch node.type {
+        case .FIELD:
+            
+        case .OBJECT:
+            #partial switch tiv in binding_ti.variant {
+                case runtime.Type_Info_Struct:
+                    for child := node.first; child != nil; child = child.next {
+                        member := reflect.struct_field_by_name(node.data_binding.id, child.name) 
+                        if member == {} do continue
+                        member_any := any {
+                            data = mem.ptr_offset(cast(^u8)node.data_binding.data, member.offset),
+                            id   = member.type.id,
+                        }
+                        add_data_binding_to_node(child, member_any)
+                    }
+                    
+                case runtime.Type_Info_Map:
+                    for child := node.first; child != nil; child = child.next {
+                        raw_map := cast(^runtime.Raw_Map) node.data_binding.data
+                        
+                        // This is a leak, need to figure out how to give the user some idea 
+                        //   that he needs to clone these strings and manage them himself.
+                        name_copy := strings.clone(child.name)
+                        key       := cast(rawptr) &name_copy
+                        
+                        runtime.__dynamic_map_check_grow(raw_map, tiv.map_info)
+                        
+                        // allocate empty space that can be safely memcopied from
+                        // this has to be done because apparently there's no way to insert a hash
+                        //   dynamically without passing a value
+                        empty_value := cast(rawptr) raw_data(make([]u8, tiv.value.size, context.temp_allocator))
+            
+                        value := runtime.__dynamic_map_set_without_hash(
+                            raw_map, tiv.map_info, key, empty_value,
+                        )
+                        
+                        child.data_binding = any { rawptr(value), tiv.value.id }
+                    }
+            }
+        
+        case .ARRAY:
+            #partial switch tiv in binding_ti.variant {
+                case runtime.Type_Info_Bit_Set:
+                    for child := node.first; child != nil; child = child.next {
+                        add_data_binding_to_node(child, node.data_binding)
+                    }
+                
+                case runtime.Type_Info_Struct:
+                    index := 0
+                    for child := node.first; child != nil; child = child.next {
+                        member_any := any {
+                            data = mem.ptr_offset(cast(^u8)node.data_binding.data, tiv.offsets[index]),
+                            id   = tiv.types[index].id,
+                        }
+                        add_data_binding_to_node(child, member_any)
+                        index += 1
+                    }
+                    
+                case runtime.Type_Info_Dynamic_Array:
+                    if !reserve_any_dynamic_array(node.data_binding, node.count) { 
+                        return false
+                    }
+                    raw_array := cast(^runtime.Raw_Dynamic_Array) node.data_binding.data
+                    index := 0
+                    for child := node.first; child != nil; child = child.next {
+                        elem_any := any {
+                            data = mem.ptr_offset(cast(^u8)raw_array.data, tiv.elem.size * index),
+                            id   = tiv.elem.id,
+                        }
+                        add_data_binding_to_node(child, elem_any)
+                        index += 1
+                    }
+        
+                case runtime.Type_Info_Array:
+                    elem_ti := runtime.type_info_base(tiv.elem)
+                    index := 0
+                    for child := node.first; child != nil; child = child.next {
+                        elem_any := any {
+                            data = mem.ptr_offset(cast(^u8)node.data_binding.data, tiv.elem.size * index),
+                            id   = tiv.elem.id,
+                        }
+                        add_data_binding_to_node(child, elem_any)
+                        index += 1
+                    }
+        
+                case runtime.Type_Info_Slice:
+                    raw_slice := cast(^runtime.Raw_Slice) node.data_binding.data
+                    index := 0
+                    for child := node.first; child != nil; child = child.next {
+                        elem_any := any {
+                            data = mem.ptr_offset(cast(^u8)raw_slice.data,  tiv.elem.size * index),
+                            id   = tiv.elem.id,
+                        }
+                        add_data_binding_to_node(child, elem_any)
+                        index += 1
+                    }
+            }
+            
+        case:
+            // invalid node type error?
+    }
+    
+    return true
+}
+
+
+is_binding_valid :: proc(node: ^DOM_Node, binding: any) -> bool {
+    binding_ti := runtime.type_info_base(type_info_of(binding.id))
+    #partial switch node.type {
+        case .FIELD:
+            #partial switch tiv in binding_ti.variant {
+                case runtime.Type_Info_Integer,
+                     runtime.Type_Info_Float,
+                     runtime.Type_Info_Enum,
+                     runtime.Type_Info_String,
+                     runtime.Type_Info_Boolean:
+                    return true
+                
+                case runtime.Type_Info_Bit_Set: 
+                    // For bit sets, both the enclosing array and the individual elements have the same binding
+                    // For fields, we must verify that the parent binding is the same as the field binding
+                    if node.parent.data_binding.data == binding.data {
+                        return true
+                    }
+                
+                // arrays of bytes/u8 are permitted as single-valued fields so that we can parse them as strings
+                case runtime.Type_Info_Array         : if tiv.elem.size == 1 do return true
+                case runtime.Type_Info_Dynamic_Array : if tiv.elem.size == 1 do return true
+                case runtime.Type_Info_Slice         : if tiv.elem.size == 1 do return true
+            }
+            
+        case .OBJECT:
+            #partial switch tiv in binding_ti.variant {
+                case runtime.Type_Info_Array,
+                     runtime.Type_Info_Dynamic_Array,
+                     runtime.Type_Info_Slice,
+                     runtime.Type_Info_Map,
+                     runtime.Type_Info_Struct:
+                    return true
+            }
+            
+        case .ARRAY:
+            // For array cases, we precheck the length of the gon array against that of the internal data type
+            #partial switch tiv in binding_ti.variant {
+                case runtime.Type_Info_Array:
+                    if node.count >= tiv.count {
+                        return true
+                    }
+                
+                case runtime.Type_Info_Slice:
+                    // maybe add some check to see if these are supposed to be parsed as indexed or something
+                    // In general, parsing is designed to be a bit more lax about accepting input, so long as it is valid GON
+                    // but we probably want to have soem settings around this in particular
+                    raw_slice := cast(^runtime.Raw_Slice) binding.data
+                    if node.count >= raw_slice.len {
+                        return true
+                    }
+
+                case runtime.Type_Info_Dynamic_Array:
+                    
+                case runtime.Type_Info_Bit_Set:
+                    // For bit sets, both the enclosing array and the individual elements have the same binding
+                    // For arrays, we must verify that the this field's binding is NOT the same as its parent's binding
+                    // (If it is, that means we have another array nested inside our bit set, which is not valid syntax)
+                    if node.parent.data_binding.data != binding.data {
+                        return true
+                    }
+                
+                case runtime.Type_Info_Struct:
+                    if node.count >= len(tiv.names) {
+                        return true
+                    }
+                    return true
+            }
+            
+        case:
+            // TODO: invalid node type error?
+    }
+    
+    // log("Unable to bind node \"%v\" of type %v to data of type: %v", node.name, node.type, binding.id)
+    // TODO: print node address
+    
+    return false
 }
