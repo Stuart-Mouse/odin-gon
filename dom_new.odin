@@ -585,8 +585,7 @@ add_data_binding_to_dom_parser :: proc(using parser: ^DOM_Parser, binding: any, 
         run when creating a data binding to a dom node
             may be able to handle most of these cases with io data based on data type
     
-    
-    what all does my sax parser currently support?
+    sax parser features
         parsing
             parse array indexed
             custom parse proc
@@ -599,10 +598,28 @@ add_data_binding_to_dom_parser :: proc(using parser: ^DOM_Parser, binding: any, 
             serialize object as an array
             serialize array as an object
             serialize obj/arr on one line
-                maybe we make this better by setting how many per line?
-                    this can be custom proc thing
             serialize array as object with index as name
             
+    dom parser features
+        parsing
+            + plain old data, default formatting
+            + indexed arrays
+            + arrays of named objects
+            - map types
+                - support key types other than string
+                - store key value to map key member (need to not duplicate string here, so that user can free)
+            - field refs
+                - get index (parent must be array)
+                - get binding pointer
+                - get binding value
+            - callbacks / fully custom formatting
+            - expression evaluation with lead sheets integration
+            
+        serialization
+            + plain old data, default formatting
+            - sameline flag with somewhat intelligent defaults
+            - callbacks / fully custom formatting
+        
 */
 
 process_node_bindings :: proc(using parser: ^DOM_Parser, node: ^DOM_Node) -> bool {
@@ -757,36 +774,53 @@ add_data_binding_to_node :: proc(node: ^DOM_Node, binding: any) -> bool  {
                     }
                     
                 case runtime.Type_Info_Map:
+                    // currently, only map[string] T types are supported, will support other key types later
+                
+                    // I suppose map key bindings are a special exception to the rule that we don't assign any values at this point in parsing
+                    // this should be fine because we can't use a field ref for the name or anything funky like that, so this will not possibly have any data dependencies
+                    map_key_binding: any
+                    value_ti := runtime.type_info_base(tiv.value)
+                    _, is_struct := value_ti.variant.(runtime.Type_Info_Struct) 
+                    if is_struct {
+                        type_io_data, found := IO_Data_Lookup[value_ti.id]
+                        if found {
+                            member := reflect.struct_field_by_name(value_ti.id, type_io_data.map_key_member) 
+                            if member != {} {
+                                map_key_binding = any {
+                                    data = mem.ptr_offset(cast(^u8)node.data_binding.data, member.offset),
+                                    id   = member.type.id,
+                                }
+                            }
+                        }
+                    }
+                    
                     for child := node.first; child != nil; child = child.next {
                         raw_map := cast(^runtime.Raw_Map) node.data_binding.data
-                        // This is a leak, need to figure out how to give the user some idea 
-                        //   that he needs to clone these strings and manage them himself.
-                        // TODO: we will handle this using io_data.map_key_member
-                        name_copy := strings.clone(child.name)
-                        key       := cast(rawptr) &name_copy
+                        
+                        // We copy the name here with the understanding that if map_key_member is not set in io data, 
+                        // then the user needs to free the keys manually, as though the map itself owns the keys
+                        name_copy: string
+                        if map_key_binding.data != nil {
+                            if !set_value_from_string(map_key_binding, child.name) {
+                                return false
+                            }
+                            name_copy = (cast(^string) map_key_binding.data)^
+                        } else {
+                            name_copy = strings.clone(child.name)
+                        }
+                        key := cast(rawptr) &name_copy
+                        
                         runtime.__dynamic_map_check_grow(raw_map, tiv.map_info)
+                        
                         // allocate empty space that can be safely memcopied from
-                        // this has to be done because apparently there's no way to insert a hash
-                        //   dynamically without passing a value
+                        // this has to be done because apparently there's no way to insert a hash dynamically without passing a value
                         empty_value := cast(rawptr) raw_data(make([]u8, tiv.value.size, context.temp_allocator))
                         value := runtime.__dynamic_map_set_without_hash(
                             raw_map, tiv.map_info, key, empty_value,
                         )
                         child.data_binding = any { rawptr(value), tiv.value.id }
-                    }
-                    if .ARRAY_AS_OBJECT in node.parent.flags {
-                        // get name member from io data
-                        type_io_data, found := IO_Data_Lookup[node.data_binding.id]
-                        if found {
-                            member := reflect.struct_field_by_name(node.data_binding.id, type_io_data.map_key_member) 
-                            if member != {} {
-                                member_any := any {
-                                    data = mem.ptr_offset(cast(^u8)node.data_binding.data, member.offset),
-                                    id   = member.type.id,
-                                }
-                                node.name_binding = member_any
-                            }
-                        }
+                        
+                        
                     }
                     
                 /*
@@ -794,39 +828,65 @@ add_data_binding_to_node :: proc(node: ^DOM_Node, binding: any) -> bool  {
                     since for arrays, most of the code is shared in common and we only have a bit of extra handling for objects.
                 */
                 case runtime.Type_Info_Dynamic_Array:
-                    elem_ti := runtime.type_info_base(tiv.elem)
-                    _, is_struct := elem_ti.variant.(runtime.Type_Info_Struct) 
-                    _, is_map    := elem_ti.variant.(runtime.Type_Info_Map) 
-                    if is_struct || is_map {
-                        node.flags |= { .ARRAY_AS_OBJECT }
-                    }
-                    if !reserve_any_dynamic_array(node.data_binding, node.count) { 
-                        return false
-                    }
                     raw_array := cast(^runtime.Raw_Dynamic_Array) node.data_binding.data
-                    raw_array.len = node.count
+                
+                    io_data, found := &IO_Data_Lookup[binding_ti.id]
+                    if found && .PARSE_ARRAY_INDEXED in io_data.parse.flags {
+                        node.flags |= { .ARRAY_INDEXED }
+                        // highest_index := 0
+                        // for child := node.first; child != nil; child = child.next {
+                        //     highest_index =  // we would have to strconv here, don't want to repeat that work... but also don't want to store index value on node
+                        // }
+                    } else {
+                        elem_ti := runtime.type_info_base(tiv.elem)
+                        _, is_struct := elem_ti.variant.(runtime.Type_Info_Struct) 
+                        if is_struct {
+                            node.flags |= { .ARRAY_AS_OBJECT }
+                        }
+                        if !reserve_any_dynamic_array(node.data_binding, node.count) { 
+                            return false
+                        }
+                        raw_array.len = node.count
+                    }
+                    
                     index := 0
                     for child := node.first; child != nil; child = child.next {
-                        elem_any := any {
-                            data = mem.ptr_offset(cast(^u8)raw_array.data, tiv.elem.size * index),
-                            id   = tiv.elem.id,
+                        elem_any: any
+                        if .ARRAY_INDEXED in node.flags {
+                            elem_index := strconv.atoi(child.name)
+                            elem_any = array_add_any_at_index(node.data_binding, elem_index)
+                        } else {
+                            elem_any = any {
+                                data = mem.ptr_offset(cast(^u8)raw_array.data, tiv.elem.size * index),
+                                id   = tiv.elem.id,
+                            }
                         }
                         add_data_binding_to_node(child, elem_any)
                         index += 1
                     }
                     
-        
                 case runtime.Type_Info_Array:
-                    elem_ti := runtime.type_info_base(tiv.elem)
-                    _, is_struct := elem_ti.variant.(runtime.Type_Info_Struct) 
-                    _, is_map    := elem_ti.variant.(runtime.Type_Info_Map) 
-                    if is_struct || is_map {
-                        node.flags |= { .ARRAY_AS_OBJECT }
+                    io_data, found := &IO_Data_Lookup[binding_ti.id]
+                    if found && .PARSE_ARRAY_INDEXED in io_data.parse.flags {
+                        node.flags |= { .ARRAY_INDEXED }
+                    } else {
+                        elem_ti := runtime.type_info_base(tiv.elem)
+                        _, is_struct := elem_ti.variant.(runtime.Type_Info_Struct) 
+                        if is_struct {
+                            node.flags |= { .ARRAY_AS_OBJECT }
+                        }
                     }
                     index := 0
                     for child := node.first; child != nil; child = child.next {
+                        elem_index := index
+                        if .ARRAY_INDEXED in node.flags {
+                            elem_index = strconv.atoi(child.name)
+                            if elem_index >= tiv.count {
+                                return false
+                            }
+                        }
                         elem_any := any {
-                            data = mem.ptr_offset(cast(^u8)node.data_binding.data, tiv.elem.size * index),
+                            data = mem.ptr_offset(cast(^u8)node.data_binding.data, tiv.elem.size * elem_index),
                             id   = tiv.elem.id,
                         }
                         add_data_binding_to_node(child, elem_any)
@@ -834,17 +894,28 @@ add_data_binding_to_node :: proc(node: ^DOM_Node, binding: any) -> bool  {
                     }
         
                 case runtime.Type_Info_Slice:
-                    elem_ti := runtime.type_info_base(tiv.elem)
-                    _, is_struct := elem_ti.variant.(runtime.Type_Info_Struct) 
-                    _, is_map    := elem_ti.variant.(runtime.Type_Info_Map) 
-                    if is_struct || is_map {
-                        node.flags |= { .ARRAY_AS_OBJECT }
+                    io_data, found := &IO_Data_Lookup[binding_ti.id]
+                    if found && .PARSE_ARRAY_INDEXED in io_data.parse.flags {
+                        node.flags |= { .ARRAY_INDEXED }
+                    } else {
+                        elem_ti := runtime.type_info_base(tiv.elem)
+                        _, is_struct := elem_ti.variant.(runtime.Type_Info_Struct) 
+                        if is_struct {
+                            node.flags |= { .ARRAY_AS_OBJECT }
+                        }
                     }
                     raw_slice := cast(^runtime.Raw_Slice) node.data_binding.data
                     index := 0
                     for child := node.first; child != nil; child = child.next {
+                        elem_index := index
+                        if .ARRAY_INDEXED in node.flags {
+                            elem_index = strconv.atoi(child.name)
+                            if elem_index >= raw_slice.len {
+                                return false
+                            }
+                        }
                         elem_any := any {
-                            data = mem.ptr_offset(cast(^u8)raw_slice.data,  tiv.elem.size * index),
+                            data = mem.ptr_offset(cast(^u8)raw_slice.data,  tiv.elem.size * elem_index),
                             id   = tiv.elem.id,
                         }
                         add_data_binding_to_node(child, elem_any)

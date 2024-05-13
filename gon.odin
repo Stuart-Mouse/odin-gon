@@ -774,7 +774,6 @@ Parse_Settings :: struct {
 
 /*
     Add parsing/serialization settings data for all of your data types here at startup.
-    In Jai, we would do as much of this as possible at compile time.
 */
 IO_Data_Lookup : map[typeid]IO_Data
 

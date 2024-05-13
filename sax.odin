@@ -700,7 +700,7 @@ array_add_any :: proc(array: any) -> any {
 }
 
 array_add_any_at_index :: proc(array: any, index: int) -> any {
-    new_cap := math.next_power_of_two(index)
+    new_cap := math.next_power_of_two(index+1)
     
     if array.data == nil {
 		return false
@@ -717,6 +717,8 @@ array_add_any_at_index :: proc(array: any, index: int) -> any {
     }
     
     a := cast(^runtime.Raw_Dynamic_Array) array.data
+    
+    a.len = max(a.len, index+1)
     
     ret := any {
         data = mem.ptr_offset(cast(^u8) a.data, index * ti_array.elem.size),
