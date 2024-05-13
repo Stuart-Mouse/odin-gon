@@ -16,6 +16,19 @@ import "core:math"
 
 INDENTATION_STRING := "    "
 
+DOM_Node_Flags :: bit_set[DOM_Node_Flag]
+DOM_Node_Flag  :: enum {
+    // parsing flags
+    BINDING_RESOLVED,
+    BINDING_ON_PATH,
+    
+    ARRAY_AS_OBJECT,
+    ARRAY_INDEXED,
+
+    // formatting flags
+    SAME_LINE,
+}
+
 // this struct is kinda big
 // maybe we optimize this later, but for now just making it work
 DOM_Node :: struct {
@@ -25,12 +38,14 @@ DOM_Node :: struct {
 
     // source_location: struct { line, char: int },
 
-    name         : string,
-    // name_token_type: string,
-    type         : Field_Type,
-    data_binding : any,
-    flags        : enum { SAME_LINE },
+    name            : string,
+    // name_token_type : string,
+    name_binding : any, // not sure if we want to keep this here or only handle name bindings manually as a special case for arrays of named objects and hash maps
     
+    data_binding : any,
+    flags        : DOM_Node_Flags,
+    
+    type         : Field_Type,
     
     // value is text for .FIELD, value is children for .OBJECT and .ARRAY
     using value: struct #raw_union {
@@ -457,25 +472,36 @@ determine_node_type_for_serialization :: proc(node: ^DOM_Node) -> Field_Type {
     
 */
 
-// used to build a DOM from a text file
+DOM_Parser_Callback :: proc(^DOM_Node) -> bool
+
+DOM_Parse_Flags :: bit_set[DOM_Parse_Flag]
+DOM_Parse_Flag  :: enum {
+    SKIP_PATHS_WITHOUT_BINDINGS,
+}
+
+// used to build a DOM from a text file and evaluate data bindings on that DOM
 DOM_Parser :: struct {
     file           : string,
     dom_root       : ^DOM_Node,
-    data_bindings  : [dynamic] Data_Binding,
     log            : Log_Proc,
-    allocator      : runtime.Allocator,
+    node_allocator : runtime.Allocator,
+    callbacks      : [dynamic] DOM_Parser_Callback,
 }
 
 init_dom_parser :: proc(using parser: ^DOM_Parser, _file: string, _allocator := context.allocator) {
-    file      = _file
-    allocator = _allocator
+    file = _file
+    node_allocator = _allocator
 }
 
-add_data_binding_to_dom_parser :: proc(using parser: ^DOM_Parser, binding: any, path: string) {
-    append(&data_bindings, Data_Binding { 
-        binding    = binding, 
-        field_path = path,
-    })
+/*
+    We are no longer appending to a dynamic array of data bindings, instead just inserting those data bindings immediately when this is called by the user.
+    Which is nice because that means we save a little bit of memory on that and we don't need the Data_Binding struct anymore.
+    We also don't have to split the path into substrings, since we just process it one piece at a time as we insert the binding.
+*/
+add_data_binding_to_dom_parser :: proc(using parser: ^DOM_Parser, binding: any, path: string) -> bool {
+    node := find_node_by_path(parser.dom_root, path)
+    return add_data_binding_to_node(node, binding)
+    
     // should we precheck that field path is valid? will still have to verify that there are no conflicts later on
     // we will detect conflicts when actually creating the bindings to the DOM, since we can't just textually compare field paths trivially, and I don't want to do it that way anyhow
 }
@@ -484,7 +510,7 @@ add_data_binding_to_dom_parser :: proc(using parser: ^DOM_Parser, binding: any, 
     Steps in parsing:
     
     + read tokens and append all nodes
-    insert data bindings into dom nodes
+    + insert data bindings into dom nodes
         check data type compatibility
         maybe we should actually go ahead and set any data binding values that we can while we are here?
             because we already have to allocate space for values in dynamic arrays and such so that we can create all the indirect bindings to child nodes
@@ -549,9 +575,52 @@ add_data_binding_to_dom_parser :: proc(using parser: ^DOM_Parser, binding: any, 
     
 */
 
+
+/*
+    Callbacks for the DOM parser
+    
+    different kinds: 
+        run for each node when walking dom
+            field, obj_start, obj_end
+        run when creating a data binding to a dom node
+            may be able to handle most of these cases with io data based on data type
+    
+    
+    what all does my sax parser currently support?
+        parsing
+            parse array indexed
+            custom parse proc
+                takes parser state and field, returns error code
+                can manipulate field however it wants
+                    equivalent with dom is modifying node, need to consider lifetime of node and such
+        serialization
+            skip serializing empty fields
+            skip serializing empty subfields of object/array
+            serialize object as an array
+            serialize array as an object
+            serialize obj/arr on one line
+                maybe we make this better by setting how many per line?
+                    this can be custom proc thing
+            serialize array as object with index as name
+            
+*/
+
 process_node_bindings :: proc(using parser: ^DOM_Parser, node: ^DOM_Node) -> bool {
     for child := node.first; child != nil; child = child.next {
+        for callback in callbacks {
+            if callback != nil {
+                if !callback(child) {
+                    return false
+                }
+            }
+        }
+    
         if child.type == .OBJECT || child.type == .ARRAY {
+            if child.name_binding.data != nil {
+                if !set_value_from_string(child.name_binding, child.name) {
+                    return false
+                }
+            }
             process_node_bindings(parser, child)
         } else {
             // TODO: insert handling for field refs here
@@ -646,22 +715,6 @@ construct_dom_from_gon_file :: proc(file: string) -> (^DOM_Node) {
     return root
 }
 
-
-// check that node type is compatible with binding type
-// for fields, do everything required to process a binding in sax, except dont actually set the value
-// for array/oibject, do indirect bindings
-// eventually, mark fields that use field references to be resolved later
-add_data_bindings_to_nodes :: proc(using parser: ^DOM_Parser) -> bool {
-    for b in data_bindings {
-        node := find_node_by_path(parser.dom_root, b.field_path)
-        if node == nil do continue // maybe add a facility to mark data bindings as required
-        
-        if !add_data_binding_to_node(node, b.binding) do return false
-    }
-    
-    return true
-}
-
 add_data_binding_to_node :: proc(node: ^DOM_Node, binding: any) -> bool  {
     if node == nil || binding.data == nil do return false
 
@@ -673,14 +726,10 @@ add_data_binding_to_node :: proc(node: ^DOM_Node, binding: any) -> bool  {
     }
     node.data_binding = binding
     
-    // fmt.println(node.data_binding, binding)
-    
-    // we use the same switch structure here as is used int is_binding_valid
+    // we use the same switch structure here as is used in is_binding_valid
     // unless we will also use this is_binding_valid elsewhere, we should just do it all inline here
     // make indirect bindings onto child nodes
     #partial switch node.type {
-        case .FIELD:
-            
         case .OBJECT:
             #partial switch tiv in binding_ti.variant {
                 case runtime.Type_Info_Struct:
@@ -693,29 +742,121 @@ add_data_binding_to_node :: proc(node: ^DOM_Node, binding: any) -> bool  {
                         }
                         add_data_binding_to_node(child, member_any)
                     }
+                    if .ARRAY_AS_OBJECT in node.parent.flags {
+                        type_io_data, found := IO_Data_Lookup[node.data_binding.id]
+                        if found {
+                            member := reflect.struct_field_by_name(node.data_binding.id, type_io_data.name_member) 
+                            if member != {} {
+                                member_any := any {
+                                    data = mem.ptr_offset(cast(^u8)node.data_binding.data, member.offset),
+                                    id   = member.type.id,
+                                }
+                                node.name_binding = member_any
+                            }
+                        }
+                    }
                     
                 case runtime.Type_Info_Map:
                     for child := node.first; child != nil; child = child.next {
                         raw_map := cast(^runtime.Raw_Map) node.data_binding.data
-                        
                         // This is a leak, need to figure out how to give the user some idea 
                         //   that he needs to clone these strings and manage them himself.
+                        // TODO: we will handle this using io_data.map_key_member
                         name_copy := strings.clone(child.name)
                         key       := cast(rawptr) &name_copy
-                        
                         runtime.__dynamic_map_check_grow(raw_map, tiv.map_info)
-                        
                         // allocate empty space that can be safely memcopied from
                         // this has to be done because apparently there's no way to insert a hash
                         //   dynamically without passing a value
                         empty_value := cast(rawptr) raw_data(make([]u8, tiv.value.size, context.temp_allocator))
-            
                         value := runtime.__dynamic_map_set_without_hash(
                             raw_map, tiv.map_info, key, empty_value,
                         )
-                        
                         child.data_binding = any { rawptr(value), tiv.value.id }
                     }
+                    if .ARRAY_AS_OBJECT in node.parent.flags {
+                        // get name member from io data
+                        type_io_data, found := IO_Data_Lookup[node.data_binding.id]
+                        if found {
+                            member := reflect.struct_field_by_name(node.data_binding.id, type_io_data.map_key_member) 
+                            if member != {} {
+                                member_any := any {
+                                    data = mem.ptr_offset(cast(^u8)node.data_binding.data, member.offset),
+                                    id   = member.type.id,
+                                }
+                                node.name_binding = member_any
+                            }
+                        }
+                    }
+                    
+                /*
+                    May be better to switch on internal type first and then switch on GON field type, 
+                    since for arrays, most of the code is shared in common and we only have a bit of extra handling for objects.
+                */
+                case runtime.Type_Info_Dynamic_Array:
+                    elem_ti := runtime.type_info_base(tiv.elem)
+                    _, is_struct := elem_ti.variant.(runtime.Type_Info_Struct) 
+                    _, is_map    := elem_ti.variant.(runtime.Type_Info_Map) 
+                    if is_struct || is_map {
+                        node.flags |= { .ARRAY_AS_OBJECT }
+                    }
+                    if !reserve_any_dynamic_array(node.data_binding, node.count) { 
+                        return false
+                    }
+                    raw_array := cast(^runtime.Raw_Dynamic_Array) node.data_binding.data
+                    raw_array.len = node.count
+                    index := 0
+                    for child := node.first; child != nil; child = child.next {
+                        elem_any := any {
+                            data = mem.ptr_offset(cast(^u8)raw_array.data, tiv.elem.size * index),
+                            id   = tiv.elem.id,
+                        }
+                        add_data_binding_to_node(child, elem_any)
+                        index += 1
+                    }
+                    
+        
+                case runtime.Type_Info_Array:
+                    elem_ti := runtime.type_info_base(tiv.elem)
+                    _, is_struct := elem_ti.variant.(runtime.Type_Info_Struct) 
+                    _, is_map    := elem_ti.variant.(runtime.Type_Info_Map) 
+                    if is_struct || is_map {
+                        node.flags |= { .ARRAY_AS_OBJECT }
+                    }
+                    index := 0
+                    for child := node.first; child != nil; child = child.next {
+                        elem_any := any {
+                            data = mem.ptr_offset(cast(^u8)node.data_binding.data, tiv.elem.size * index),
+                            id   = tiv.elem.id,
+                        }
+                        add_data_binding_to_node(child, elem_any)
+                        index += 1
+                    }
+        
+                case runtime.Type_Info_Slice:
+                    elem_ti := runtime.type_info_base(tiv.elem)
+                    _, is_struct := elem_ti.variant.(runtime.Type_Info_Struct) 
+                    _, is_map    := elem_ti.variant.(runtime.Type_Info_Map) 
+                    if is_struct || is_map {
+                        node.flags |= { .ARRAY_AS_OBJECT }
+                    }
+                    raw_slice := cast(^runtime.Raw_Slice) node.data_binding.data
+                    index := 0
+                    for child := node.first; child != nil; child = child.next {
+                        elem_any := any {
+                            data = mem.ptr_offset(cast(^u8)raw_slice.data,  tiv.elem.size * index),
+                            id   = tiv.elem.id,
+                        }
+                        add_data_binding_to_node(child, elem_any)
+                        index += 1
+                    }
+                    /* 
+                        TODO: 
+                        GON objects can only validly be bound to arrays when the element type is either a struct or hash map,
+                        or if it is an indexed array (where the name of each field is the index to which the value will be stored).
+                        So, we should perform a check to ensure that these conditions are met, else return an error.
+                        The user will have to state explicitly that they want to parse a given array binding as an indexed array, otherwise there is some ambiguity as to how to handle ths situation.
+                    */
             }
         
         case .ARRAY:
@@ -741,6 +882,7 @@ add_data_binding_to_node :: proc(node: ^DOM_Node, binding: any) -> bool  {
                         return false
                     }
                     raw_array := cast(^runtime.Raw_Dynamic_Array) node.data_binding.data
+                    raw_array.len = node.count
                     index := 0
                     for child := node.first; child != nil; child = child.next {
                         elem_any := any {
@@ -803,7 +945,7 @@ is_binding_valid :: proc(node: ^DOM_Node, binding: any) -> bool {
                         return true
                     }
                 
-                // arrays of bytes/u8 are permitted as single-valued fields so that we can parse them as strings
+                // Arrays of bytes/u8 are permitted as single-valued fields so that we can parse them as strings
                 case runtime.Type_Info_Array         : if tiv.elem.size == 1 do return true
                 case runtime.Type_Info_Dynamic_Array : if tiv.elem.size == 1 do return true
                 case runtime.Type_Info_Slice         : if tiv.elem.size == 1 do return true
@@ -819,8 +961,12 @@ is_binding_valid :: proc(node: ^DOM_Node, binding: any) -> bool {
                     return true
             }
             
+        /* 
+            For array cases, we precheck the length of the gon array against that of the internal data type.
+            This can't be done for dynamic arrays obviously, but for those we will pre-reserve space for the required number of elements when we assign a data binding.
+            We also precheck the array length for structs, since we know something is wrong if there are more values specified in the GON array than there are fields in the struct.
+        */
         case .ARRAY:
-            // For array cases, we precheck the length of the gon array against that of the internal data type
             #partial switch tiv in binding_ti.variant {
                 case runtime.Type_Info_Array:
                     if node.count >= tiv.count {
@@ -830,13 +976,14 @@ is_binding_valid :: proc(node: ^DOM_Node, binding: any) -> bool {
                 case runtime.Type_Info_Slice:
                     // maybe add some check to see if these are supposed to be parsed as indexed or something
                     // In general, parsing is designed to be a bit more lax about accepting input, so long as it is valid GON
-                    // but we probably want to have soem settings around this in particular
+                    // but we probably want to have some settings around this in particular
                     raw_slice := cast(^runtime.Raw_Slice) binding.data
                     if node.count >= raw_slice.len {
                         return true
                     }
 
                 case runtime.Type_Info_Dynamic_Array:
+                    return true
                     
                 case runtime.Type_Info_Bit_Set:
                     // For bit sets, both the enclosing array and the individual elements have the same binding

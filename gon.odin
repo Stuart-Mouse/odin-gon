@@ -210,7 +210,7 @@ type_has_custom_serialization_proc :: proc(type: typeid) -> bool {
 }
 
 /*
-  Trying to just get a quick and dirty solution done, so there are some things done very inefficiently.
+    Trying to just get a quick and dirty solution done, so there are some things done very inefficiently.
     For example, the print_to_builder proc was just inteded to allow me to more easily port my Jai code even though the temp allocations are kinda dumb.
 */
 serialize_any :: proc(
@@ -779,12 +779,13 @@ Parse_Settings :: struct {
 IO_Data_Lookup : map[typeid]IO_Data
 
 IO_Data :: struct {
-    parse       : Parse_Settings,
-    serialize   : Serialization_Settings,
+    parse     : Parse_Settings,
+    serialize : Serialization_Settings,
 
     // for structs only
-    name_member : string,
-    member_data : map[string]IO_Data,
+    name_member    : string,
+    map_key_member : string,
+    member_data    : map[string]IO_Data,
 }
 
 // Do we really even want or need these wrapper functions? 
@@ -799,29 +800,3 @@ get_io_data :: proc(type: typeid) -> (^IO_Data, bool) {
 register_io_data :: proc(type: typeid, io_data: IO_Data) {
     IO_Data_Lookup[type] = io_data
 }
-
-
-// Data_Mappings :: struct {
-
-// }
-
-// Data_Mappings_Node :: struct {
-
-// }
-
-// generate_file_bindings :: proc(bindings: []Data_Binding) -> Data_Mappings {
-//   for {
-//     all_complete := false
-
-
-
-//     if all_complete do break
-//   }
-// }
-
-// Serialization_Context :: struct {
-//   settings      : Parse_Settings,
-//   builder       : strings.Builder,
-//   data_bindings : []Data_Binding,
-// }
-
