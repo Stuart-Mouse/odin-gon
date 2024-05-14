@@ -541,7 +541,7 @@ process_data_binding :: proc(using ctxt: ^Parser, field: ^SAX_Field) -> bool {
             Then we can also have options there for whether or not to null-terminate.
             Presumably, if we are writing a string into a buffer, we always want to null-terminate though...
 */
-set_value_from_string :: proc(value: any, text: string) -> bool {
+set_value_from_string :: proc(value: any, text: string, no_copy := false) -> bool {
     using runtime
     if text == "" do return true
     ti := type_info_base(type_info_of(value.id))
@@ -609,7 +609,10 @@ set_value_from_string :: proc(value: any, text: string) -> bool {
             return true
 
         case Type_Info_String:
-            string_value := strings.clone(text)
+            string_value := text
+            if !no_copy {
+                string_value = strings.clone(string_value)
+            }
             if tiv.is_cstring {
                 (cast(^cstring)value.data)^ = cstring(raw_data(string_value))
             } else {

@@ -40,7 +40,7 @@ DOM_Node :: struct {
 
     name            : string,
     // name_token_type : string,
-    name_binding : any, // not sure if we want to keep this here or only handle name bindings manually as a special case for arrays of named objects and hash maps
+    // name_binding : any, // not sure if we want to keep this here or only handle name bindings manually as a special case for arrays of named objects and hash maps
     
     data_binding : any,
     flags        : DOM_Node_Flags,
@@ -633,11 +633,6 @@ process_node_bindings :: proc(using parser: ^DOM_Parser, node: ^DOM_Node) -> boo
         }
     
         if child.type == .OBJECT || child.type == .ARRAY {
-            if child.name_binding.data != nil {
-                if !set_value_from_string(child.name_binding, child.name) {
-                    return false
-                }
-            }
             process_node_bindings(parser, child)
         } else {
             // TODO: insert handling for field refs here
@@ -759,6 +754,8 @@ add_data_binding_to_node :: proc(node: ^DOM_Node, binding: any) -> bool  {
                         }
                         add_data_binding_to_node(child, member_any)
                     }
+                    
+                    // TODO: maybe we want error handling when name member is missing
                     if .ARRAY_AS_OBJECT in node.parent.flags {
                         type_io_data, found := IO_Data_Lookup[node.data_binding.id]
                         if found {
@@ -768,7 +765,9 @@ add_data_binding_to_node :: proc(node: ^DOM_Node, binding: any) -> bool  {
                                     data = mem.ptr_offset(cast(^u8)node.data_binding.data, member.offset),
                                     id   = member.type.id,
                                 }
-                                node.name_binding = member_any
+                                if !set_value_from_string(member_any, node.name) {
+                                    return false
+                                }
                             }
                         }
                     }
@@ -778,49 +777,43 @@ add_data_binding_to_node :: proc(node: ^DOM_Node, binding: any) -> bool  {
                 
                     // I suppose map key bindings are a special exception to the rule that we don't assign any values at this point in parsing
                     // this should be fine because we can't use a field ref for the name or anything funky like that, so this will not possibly have any data dependencies
-                    map_key_binding: any
+                    key_member: reflect.Struct_Field
                     value_ti := runtime.type_info_base(tiv.value)
                     _, is_struct := value_ti.variant.(runtime.Type_Info_Struct) 
                     if is_struct {
-                        type_io_data, found := IO_Data_Lookup[value_ti.id]
+                        type_io_data, found := IO_Data_Lookup[tiv.value.id]
                         if found {
-                            member := reflect.struct_field_by_name(value_ti.id, type_io_data.map_key_member) 
-                            if member != {} {
-                                map_key_binding = any {
-                                    data = mem.ptr_offset(cast(^u8)node.data_binding.data, member.offset),
-                                    id   = member.type.id,
-                                }
-                            }
+                            key_member = reflect.struct_field_by_name(value_ti.id, type_io_data.map_key_member) 
                         }
                     }
                     
+                    empty_value := cast(rawptr) raw_data(make([]u8, tiv.value.size, context.temp_allocator))
                     for child := node.first; child != nil; child = child.next {
                         raw_map := cast(^runtime.Raw_Map) node.data_binding.data
                         
                         // We copy the name here with the understanding that if map_key_member is not set in io data, 
                         // then the user needs to free the keys manually, as though the map itself owns the keys
-                        name_copy: string
-                        if map_key_binding.data != nil {
-                            if !set_value_from_string(map_key_binding, child.name) {
-                                return false
-                            }
-                            name_copy = (cast(^string) map_key_binding.data)^
-                        } else {
-                            name_copy = strings.clone(child.name)
-                        }
+                        name_copy := strings.clone(child.name)
                         key := cast(rawptr) &name_copy
                         
                         runtime.__dynamic_map_check_grow(raw_map, tiv.map_info)
                         
                         // allocate empty space that can be safely memcopied from
                         // this has to be done because apparently there's no way to insert a hash dynamically without passing a value
-                        empty_value := cast(rawptr) raw_data(make([]u8, tiv.value.size, context.temp_allocator))
                         value := runtime.__dynamic_map_set_without_hash(
                             raw_map, tiv.map_info, key, empty_value,
                         )
-                        child.data_binding = any { rawptr(value), tiv.value.id }
+                        add_data_binding_to_node(child, any { rawptr(value), tiv.value.id })
                         
-                        
+                        if key_member != {} {
+                            key_binding := any {
+                                data = mem.ptr_offset(cast(^u8)child.data_binding.data, key_member.offset),
+                                id   = key_member.type.id,
+                            }
+                            if !set_value_from_string(key_binding, name_copy, no_copy = true) {
+                                return false
+                            }
+                        }
                     }
                     
                 /*
@@ -923,7 +916,7 @@ add_data_binding_to_node :: proc(node: ^DOM_Node, binding: any) -> bool  {
                     }
                     /* 
                         TODO: 
-                        GON objects can only validly be bound to arrays when the element type is either a struct or hash map,
+                        GON objects can only validly be bound to arrays when the element type is a struct,
                         or if it is an indexed array (where the name of each field is the index to which the value will be stored).
                         So, we should perform a check to ensure that these conditions are met, else return an error.
                         The user will have to state explicitly that they want to parse a given array binding as an indexed array, otherwise there is some ambiguity as to how to handle ths situation.
