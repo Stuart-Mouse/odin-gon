@@ -37,6 +37,11 @@ File_Format :: enum {
     // XML,
 }
 
+Token :: struct {
+    type: Token_Type,
+    text: string,
+}
+
 // refactor so that it is easier to add user implementations
 SAX_Tokenizer :: struct {
     type: File_Format,
@@ -47,7 +52,8 @@ SAX_Tokenizer :: struct {
 }
 
 GON_Tokenizer :: struct {
-    file: string,
+    file           : string,
+    stashed_tokens : [3] Token,
 }
 
 Parser :: struct {    

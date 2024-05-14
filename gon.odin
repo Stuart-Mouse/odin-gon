@@ -31,7 +31,7 @@ log_stub :: proc(format: string, args: ..any, loc := #caller_location) { }
 */
 
 whitespace_chars :: " ,\t\r\n\x00"
-reserved_chars   :: "#{}[]\""
+reserved_chars   :: "~!@#$%^&*{}[]\""
 whitespace_and_reserved_chars :: " ,\t\r\n#{}[]\"\x00"
 
 Token_Type :: enum {
@@ -41,6 +41,9 @@ Token_Type :: enum {
     OBJECT_END,
     ARRAY_BEGIN,
     ARRAY_END,
+    REF_INDEX,
+    REF_POINTER,
+    REF_VALUE,
     EOF,
 }
 

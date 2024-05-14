@@ -24,6 +24,14 @@ DOM_Node_Flag  :: enum {
     
     ARRAY_AS_OBJECT,
     ARRAY_INDEXED,
+    ARRAY_ENUMERATED,
+    
+    // flags to denote that node is a reference to another node
+    // should be mutually exclusive in practice, but I don't want to introduce a reftype enum
+    // maybe we change this later if we can keep dom_node_flags as u8 or other smaller type and reftype as u8
+    REF_INDEX,
+    REF_POINTER,
+    REF_VALUE,
 
     // formatting flags
     SAME_LINE,
@@ -38,9 +46,8 @@ DOM_Node :: struct {
 
     // source_location: struct { line, char: int },
 
-    name            : string,
-    // name_token_type : string,
-    // name_binding : any, // not sure if we want to keep this here or only handle name bindings manually as a special case for arrays of named objects and hash maps
+    name         : string,
+    // name_token_type : Token_Type,
     
     data_binding : any,
     flags        : DOM_Node_Flags,
@@ -50,7 +57,7 @@ DOM_Node :: struct {
     // value is text for .FIELD, value is children for .OBJECT and .ARRAY
     using value: struct #raw_union {
         text : string,
-        // text_token_type: string, 
+        // text_token_type: Token_Type, 
         using children: struct { 
             first : ^DOM_Node,
             last  : ^DOM_Node,
@@ -509,8 +516,8 @@ add_data_binding_to_dom_parser :: proc(using parser: ^DOM_Parser, binding: any, 
 /*
     Steps in parsing:
     
-    + read tokens and append all nodes
-    + insert data bindings into dom nodes
+    read tokens and append all nodes
+    insert data bindings into dom nodes
         check data type compatibility
         maybe we should actually go ahead and set any data binding values that we can while we are here?
             because we already have to allocate space for values in dynamic arrays and such so that we can create all the indirect bindings to child nodes
@@ -531,10 +538,12 @@ add_data_binding_to_dom_parser :: proc(using parser: ^DOM_Parser, binding: any, 
                     ok, so maybe this is actually a reason that we want to perform all allocations before setting any data, 
             short answer, no because of field ref evaluation
         if value uses field reference, save this and resolve later
+        
     resolve field references / data dependencies
         it's possible there's a circular dependency in which case we should error
         better to do this before setting any values, the idea is that every thing is correct before we start allocating
             moot point, we have to allocate in order to make the indirect data data bindings earlier in the process
+            
     set data from text values of fields
         run callbacks when walking dom similar to what we have in sax mode
     
@@ -605,9 +614,12 @@ add_data_binding_to_dom_parser :: proc(using parser: ^DOM_Parser, binding: any, 
             + plain old data, default formatting
             + indexed arrays
             + arrays of named objects
-            - map types
+            + map types
                 - support key types other than string
-                - store key value to map key member (need to not duplicate string here, so that user can free)
+                + store key value to map key member (need to not duplicate string here, so that user can free)
+            - enumerated arrays
+            - indexing normal arrays with enums?
+                - just add enum typeid in io_data for array ezpz
             - field refs
                 - get index (parent must be array)
                 - get binding pointer
@@ -644,11 +656,9 @@ process_node_bindings :: proc(using parser: ^DOM_Parser, node: ^DOM_Node) -> boo
     return true
 }
 
-construct_dom_from_gon_file :: proc(file: string) -> (^DOM_Node) {
-    file := file
-
-    next_token_type : Token_Type
-    next_token      : string
+construct_dom_from_gon_file :: proc(using t: ^Tokenizer) -> (^DOM_Node) {
+    next_token: Token
+    ok        : bool
     
     root := new(DOM_Node)
     root.name = "root"
@@ -662,15 +672,26 @@ construct_dom_from_gon_file :: proc(file: string) -> (^DOM_Node) {
     
     parent := root
     L_Loop: for parent != nil {
-        name, text: string
-        type: Field_Type
+        name, text : string
+        type  : Field_Type
+        flags : DOM_Node_Flags
+        
+        // check for field refs
+        next_token, ok = __peek_token(t)
+        if !ok do return nil
+        #partial switch next_token.type {
+            case .REF_INDEX:
+                flags |= .REF_INDEX
+                if !__consume_token(t) do return nil
+        }
         
         // read field name
         if parent.type != .ARRAY {
-            next_token_type, next_token = get_next_token_gon(&file)
-            #partial switch next_token_type {
+            next_token, ok = __get_token(t)
+            if !ok do return nil
+            #partial switch next_token.type {
                 case .STRING: 
-                    name = next_token
+                    name = next_token.text
                 case .EOF:
                     if parent != root {
                         return nil
@@ -690,11 +711,12 @@ construct_dom_from_gon_file :: proc(file: string) -> (^DOM_Node) {
         }
 
         // read field value
-        next_token_type, next_token = get_next_token_gon(&file)
-        #partial switch next_token_type {
+        next_token, ok = __get_token(t)
+        if !ok do return nil
+        #partial switch next_token.type {
             case .STRING: 
                 type = .FIELD
-                text = next_token
+                text = next_token.text
             case .OBJECT_BEGIN: 
                 type = .OBJECT
             case .ARRAY_BEGIN: 
@@ -774,7 +796,10 @@ add_data_binding_to_node :: proc(node: ^DOM_Node, binding: any) -> bool  {
                     
                 case runtime.Type_Info_Map:
                     // currently, only map[string] T types are supported, will support other key types later
-                
+                    if tiv.key != string {
+                        return false
+                    }
+                    
                     // I suppose map key bindings are a special exception to the rule that we don't assign any values at this point in parsing
                     // this should be fine because we can't use a field ref for the name or anything funky like that, so this will not possibly have any data dependencies
                     key_member: reflect.Struct_Field
@@ -786,6 +811,13 @@ add_data_binding_to_node :: proc(node: ^DOM_Node, binding: any) -> bool  {
                             key_member = reflect.struct_field_by_name(value_ti.id, type_io_data.map_key_member) 
                         }
                     }
+                    
+                    // in order to support other key types, we need to have some kind of dynamic_new() proc
+                    // we can use the temp allocator to allocatate space for one item that we reuse for all chidren, like we do for the empty value
+                    // may as well make the acutal proc and have it return an any, so that we can pass this to set_value_from_string()
+                    // also, we will still only be able to use simple data types like ints, floats, enums since those are the only things we can represent in a gon name
+                    // this is sort of a low priority feature tbh
+                    // also, maybe we just use a fixed 16 bytes on stack for the key value, since we won't have any types larger than an i128 or string
                     
                     empty_value := cast(rawptr) raw_data(make([]u8, tiv.value.size, context.temp_allocator))
                     for child := node.first; child != nil; child = child.next {
@@ -1072,4 +1104,84 @@ is_binding_valid :: proc(node: ^DOM_Node, binding: any) -> bool {
     // TODO: print node address
     
     return false
+}
+
+// current iteration of tokenizer proc, need to clean up the others later
+// we may be able to consolidate these and just have a peek bool param, assuming that's acutally better somehow
+
+__consume_token :: proc(using t: ^GON_Tokenizer) -> bool {
+    ok: bool
+    next_token, ok = lex_next_token(file)
+    return ok
+}
+
+__get_token :: proc(using t: ^GON_Tokenizer) -> (Token, bool) {
+    current_token := next_token
+    return current_token, consume_token()
+}
+
+__peek_token :: proc(using t: ^GON_Tokenizer) -> Token {
+    return next_token
+}
+
+// mutates the passed string, advancing it to the position after the returned token
+lex_next_token :: proc(file: ^string) -> (Token, bool) {
+    if len(file^) <= 0                     do return {.EOF, ""}, false
+    if !skip_whitespace_and_comments(file) do return {.EOF, ""}, false
+    if len(file^) <= 0                     do return {.EOF, ""}, false
+  
+    switch file^[0] {
+        case '{':
+            advance(file)
+            return {.OBJECT_BEGIN, ""}, true
+        case '}':
+            advance(file)
+            return {.OBJECT_END, ""}, true
+        case '[':
+            advance(file)
+            return {.ARRAY_BEGIN, ""}, true
+        case ']':
+            advance(file)
+            return {.ARRAY_END, ""}, true
+        case '&':
+            advance(file)
+            return {.REF_INDEX, ""}, true
+    }
+  
+    // next token is a string token
+    string_value := file^
+  
+    // scan for end of string in quotation marks
+    if file^[0] == '\"' {
+        if !advance(file) do return {.INVALID, ""}, false
+        string_value = string_value[1:]
+        string_len := 0
+    
+        for file^[0] != '\"' {
+            adv : int = 1
+            if file^[0] == '\\' do adv = 2
+            if !advance(file, adv) do return {.INVALID, ""}, false
+            string_len += adv
+        }
+    
+        if !advance(file) do return {.INVALID, ""}, false
+    
+        return {.STRING, string_value[:string_len]}, true
+    }
+  
+    // scan for end of bare string
+    if !is_reserved_char(file^[0]) {
+        string_len := 0
+        for !is_reserved_char(file^[0]) && !is_whitespace(file^[0]) {
+            if !advance(file) {
+                return {.EOF, ""}, false
+            }
+            string_len += 1
+        }
+        return {.STRING, string_value[:string_len]}, true
+    }
+  
+    // there's probably some funky character in the file...?
+    fmt.println("Something funky happened.\n")
+    return {.INVALID, ""}, false
 }
