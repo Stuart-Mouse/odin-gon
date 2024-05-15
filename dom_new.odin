@@ -307,6 +307,7 @@ append_node_with_path :: proc(parent: ^DOM_Node, path: string = "", prepend := f
 }
 
 // if next returns empty, then there was an error and remaining is also not a valid value
+// maybe we can use the tokenizer for this
 get_next_ident_from_path_string :: proc(path: string) -> (next, remaining: string, ok: bool) {
     if path == "" do return
     remaining = path
@@ -370,6 +371,7 @@ is_character_permitted_in_unquoted_string :: proc(char: u8) -> bool {
             char == '-' || 
             char == '.'
 }
+
 
 // returns the unescaped character and the length of the escape sequence in characters
 // parse_escape_sequence :: proc(str: string) -> (u8, int) {
@@ -488,7 +490,7 @@ DOM_Parse_Flag  :: enum {
 
 // used to build a DOM from a text file and evaluate data bindings on that DOM
 DOM_Parser :: struct {
-    file           : string,
+    tokenizer      : GON_Tokenizer,
     dom_root       : ^DOM_Node,
     log            : Log_Proc,
     node_allocator : runtime.Allocator,
@@ -496,8 +498,9 @@ DOM_Parser :: struct {
 }
 
 init_dom_parser :: proc(using parser: ^DOM_Parser, _file: string, _allocator := context.allocator) {
-    file = _file
     node_allocator = _allocator
+    tokenizer.file = _file
+    __consume_token(&tokenizer) // get the first token when we init, we always pull one token ahead of the one we return
 }
 
 /*
@@ -656,7 +659,7 @@ process_node_bindings :: proc(using parser: ^DOM_Parser, node: ^DOM_Node) -> boo
     return true
 }
 
-construct_dom_from_gon_file :: proc(using t: ^Tokenizer) -> (^DOM_Node) {
+construct_dom_from_gon_file :: proc(t: ^GON_Tokenizer) -> (^DOM_Node) {
     next_token: Token
     ok        : bool
     
@@ -677,42 +680,48 @@ construct_dom_from_gon_file :: proc(using t: ^Tokenizer) -> (^DOM_Node) {
         flags : DOM_Node_Flags
         
         // check for field refs
-        next_token, ok = __peek_token(t)
-        if !ok do return nil
+        next_token = __peek_token(t)
         #partial switch next_token.type {
             case .REF_INDEX:
-                flags |= .REF_INDEX
+                flags |= {.REF_INDEX}
                 if !__consume_token(t) do return nil
         }
         
         // read field name
         if parent.type != .ARRAY {
             next_token, ok = __get_token(t)
-            if !ok do return nil
+            if !ok {
+                fmt.printfln("GON tokenization error: Unexpected %v token \"%v\".", next_token.type, next_token.text)
+                return nil
+            }
             #partial switch next_token.type {
                 case .STRING: 
                     name = next_token.text
                 case .EOF:
                     if parent != root {
+                        fmt.printfln("GON parse error: Unexpected %v token \"%v\".", next_token.type, next_token.text)
                         return nil
                     }
                     break L_Loop
                 case .OBJECT_END:
                     if parent.type != .OBJECT {
-                        // log("GON parse error: Unexpected %v token \"%v\".", next_token_type, next_token)
+                        fmt.printfln("GON parse error: Unexpected %v token \"%v\".", next_token.type, next_token.text)
                         return nil
                     }
                     parent = parent.parent
                     continue
                 case:
-                    // log("GON parse error: Unexpected %v token \"%v\".", next_token_type, next_token)
+                    fmt.printfln("GON parse error: Unexpected %v token \"%v\".", next_token.type, next_token.text)
                     return nil
             }
         }
 
         // read field value
         next_token, ok = __get_token(t)
-        if !ok do return nil
+        if !ok {
+            fmt.printfln("GON tokenization error: Unexpected %v token \"%v\".", next_token.type, next_token.text)
+            return nil
+        }
         #partial switch next_token.type {
             case .STRING: 
                 type = .FIELD
@@ -723,13 +732,13 @@ construct_dom_from_gon_file :: proc(using t: ^Tokenizer) -> (^DOM_Node) {
                 type = .ARRAY
             case .ARRAY_END:
                 if parent.type != .ARRAY {
-                    // log("GON parse error: Unexpected %v token \"%v\".", next_token_type, next_token)
+                    fmt.printfln("GON parse error: Unexpected %v token \"%v\".", next_token.type, next_token.text)
                     return nil
                 }
                 parent = parent.parent
                 continue
             case:
-                // log("GON parse error: Unexpected %v token \"%v\".", next_token_type, next_token)
+                fmt.printfln("GON parse error: Unexpected %v token \"%v\".", next_token.type, next_token.text)
                 return nil
         }
         
@@ -796,7 +805,7 @@ add_data_binding_to_node :: proc(node: ^DOM_Node, binding: any) -> bool  {
                     
                 case runtime.Type_Info_Map:
                     // currently, only map[string] T types are supported, will support other key types later
-                    if tiv.key != string {
+                    if tiv.key.id != typeid_of(string) {
                         return false
                     }
                     
@@ -1110,14 +1119,15 @@ is_binding_valid :: proc(node: ^DOM_Node, binding: any) -> bool {
 // we may be able to consolidate these and just have a peek bool param, assuming that's acutally better somehow
 
 __consume_token :: proc(using t: ^GON_Tokenizer) -> bool {
+    if next_token.type == .EOF do return true
     ok: bool
-    next_token, ok = lex_next_token(file)
+    next_token, ok = lex_next_token(&file)
     return ok
 }
 
 __get_token :: proc(using t: ^GON_Tokenizer) -> (Token, bool) {
     current_token := next_token
-    return current_token, consume_token()
+    return current_token, __consume_token(t)
 }
 
 __peek_token :: proc(using t: ^GON_Tokenizer) -> Token {
@@ -1126,9 +1136,8 @@ __peek_token :: proc(using t: ^GON_Tokenizer) -> Token {
 
 // mutates the passed string, advancing it to the position after the returned token
 lex_next_token :: proc(file: ^string) -> (Token, bool) {
-    if len(file^) <= 0                     do return {.EOF, ""}, false
-    if !skip_whitespace_and_comments(file) do return {.EOF, ""}, false
-    if len(file^) <= 0                     do return {.EOF, ""}, false
+    if len(file^) <= 0                     do return {.EOF, ""}, true
+    if !skip_whitespace_and_comments(file) do return {.EOF, ""}, true
   
     switch file^[0] {
         case '{':
@@ -1148,40 +1157,99 @@ lex_next_token :: proc(file: ^string) -> (Token, bool) {
             return {.REF_INDEX, ""}, true
     }
   
-    // next token is a string token
-    string_value := file^
-  
-    // scan for end of string in quotation marks
-    if file^[0] == '\"' {
-        if !advance(file) do return {.INVALID, ""}, false
-        string_value = string_value[1:]
-        string_len := 0
     
-        for file^[0] != '\"' {
-            adv : int = 1
-            if file^[0] == '\\' do adv = 2
-            if !advance(file, adv) do return {.INVALID, ""}, false
+    
+    is_numeric :: proc(char: u8) -> bool {
+        return char >= '0' && char <='9'
+    }
+    
+    is_alpha :: proc(char: u8) -> bool {
+        return (char >= 'a' && char <='z' ) || (char >= 'A' && char <='Z')
+    }
+    
+    if file^[0] == '\"' || file^[0] == '\'' { // quoted strings
+        quote_char := file^[0]
+        
+        if !advance(file) do return {.EOF, ""}, false
+        string_value := file^[0:]
+        string_len := 0
+        
+        for file^[0] != quote_char {
+            adv := 1 + int(file^[0] == '\\') // TODO: handle escape sequences more properly
             string_len += adv
+            if !advance(file, adv) do return {.EOF, ""}, false
         }
-    
-        if !advance(file) do return {.INVALID, ""}, false
-    
+        advance(file)
+        
+        return {.STRING, string_value[:string_len]}, true
+    }
+    else if is_numeric(file^[0]) || file^[0] == '-' { // number
+        string_value := file^[0:]
+        string_len := 0
+        
+        // number base specifiers
+        if file^[0] == '0' {
+            if file^[0] == 'b' || 
+               file^[0] == 'h' || 
+               file^[0] == 'o' || 
+               file^[0] == 'x' {
+                if !advance(file) do return {.EOF, ""}, false
+            }
+        }
+        
+        for is_numeric(file^[0]) || file^[0] == '_' || file^[0] == '.' {
+            string_len += 1
+            if !advance(file) do break
+        }
+        
+        return {.STRING, string_value[:string_len]}, true
+    }
+    else if is_alpha(file^[0]) || file^[0] == '_' { // identifier
+        string_value := file^[0:]
+        string_len := 0
+        
+        for is_alpha(file^[0]) || is_numeric(file^[0]) || file^[0] == '_' {
+            string_len += 1
+            if !advance(file) do break
+        }
+        
         return {.STRING, string_value[:string_len]}, true
     }
   
-    // scan for end of bare string
-    if !is_reserved_char(file^[0]) {
-        string_len := 0
-        for !is_reserved_char(file^[0]) && !is_whitespace(file^[0]) {
-            if !advance(file) {
-                return {.EOF, ""}, false
-            }
-            string_len += 1
-        }
-        return {.STRING, string_value[:string_len]}, true
-    }
+    // // scan for end of string in quotation marks
+    // // TODO: replace this with parse_quoted_string() or whatever
+    // if file^[0] == '\"' {
+    //     if !advance(file) do return {.EOF, ""}, false
+    //     string_value = string_value[1:]
+    //     string_len := 0
+        
+    //     for file^[0] != '\"' {
+    //         adv : int = 1
+    //         if file^[0] == '\\' do adv = 2
+    //         if !advance(file, adv) do return {.EOF, ""}, false
+    //         string_len += adv
+    //     }
+    //     advance(file) // step over closing quotation mark
+    
+    //     return {.STRING, string_value[:string_len]}, true
+    // }
+    
+    // // scan for end of bare string
+    // // TODO: also extract out logic for parsing ident/number
+    // if !is_reserved_char(file^[0]) {
+    //     string_len := 0
+    //     for !is_reserved_char(file^[0]) && !is_whitespace(file^[0]) {
+    //         if !advance(file) {
+    //             return {.EOF, ""}, false
+    //         }
+    //         string_len += 1
+    //     }
+    //     return {.STRING, string_value[:string_len]}, true
+    // }
   
     // there's probably some funky character in the file...?
-    fmt.println("Something funky happened.\n")
+    // now that we have more strict rules around what can be in an ident/number/etc., we are going to need more complex error handling
+    // TODO: handle new error cases here
+    fmt.printfln("Invalid token '%v' encountered.\n", file^)
     return {.INVALID, ""}, false
 }

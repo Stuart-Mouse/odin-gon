@@ -52,8 +52,8 @@ SAX_Tokenizer :: struct {
 }
 
 GON_Tokenizer :: struct {
-    file           : string,
-    stashed_tokens : [3] Token,
+    file       : string,
+    next_token : Token,
 }
 
 Parser :: struct {    

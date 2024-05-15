@@ -149,7 +149,7 @@ get_next_token_gon :: proc(file: ^string) -> (Token_Type, string) {
 advance :: proc(file: ^string, amount := 1) -> bool {
     amount := min(amount, len(file))
     file^ = file^[amount:]
-    return len(file) != 0 
+    return len(file) != 0
 }
 
 is_whitespace :: proc(char: u8) -> bool {
