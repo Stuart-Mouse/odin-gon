@@ -102,26 +102,35 @@ delete_child_nodes_recursive :: proc(node: ^DOM_Node) {
     }
 }
 
-find_node_by_path :: proc(node: ^DOM_Node, path: string) -> ^DOM_Node {
-    path := path
-    node := node
-    for path != "" && node != nil {
-        next, remaining, ok := get_next_ident_from_path_string(path)
-        if !ok do return nil
-        path = remaining
-        node = find_child_node_by_name(node, next)
+find_node_by_path :: proc(node: ^DOM_Node, path: string) -> (^DOM_Node, int) {
+    node  := node
+    index := 0
+    
+    t: GON_Tokenizer = { file = path }
+    __consume_token(&t)
+    
+    for node != nil {
+        next, ok := get_next_token_from_path_string(&t)
+        if !ok do return nil, 0
+        if next.type == .EOF         do break
+        if next.type == .PATH_HERE   do continue
+        if next.type == .PATH_PARENT { node = node.parent; continue }
+        node, index = find_child_node_by_name(node, next.text)
     }
-    return node
+    
+    return node, index
 }
 
 // will return nil if not found
-find_child_node_by_name :: proc(parent: ^DOM_Node, name: string) -> ^DOM_Node {
+find_child_node_by_name :: proc(parent: ^DOM_Node, name: string) -> (^DOM_Node, int) {
     node := parent.first
+    index := 0
     for node != nil {
         if node.name == name do break
         node = node.next
+        index += 1
     }
-    return node
+    return node, index
 }
 
 append_nodes_for_indirect_bindings :: proc(node: ^DOM_Node, allocator := context.allocator) {
@@ -268,99 +277,54 @@ append_child_node :: proc(parent: ^DOM_Node, prepend := false, allocator := cont
 }
 
 append_node_with_path :: proc(parent: ^DOM_Node, path: string = "", prepend := false, allocator := context.allocator) -> ^DOM_Node {
-    path := path
     node := parent
     
-    // empty path is not valid, reject it
-    if path == "" do return nil
+    t: GON_Tokenizer = { file = path }
+    __consume_token(&t)
     
     for {
-        next, remaining, ok := get_next_ident_from_path_string(path)
+        next, ok := get_next_token_from_path_string(&t)
         if !ok do return nil
-        path = remaining
         
-        if path != "" { 
-            // non-terminal node
-            // find if exists
-            child := find_child_node_by_name(node, next)
-            if child != nil {
-                if child.type != .OBJECT {
-                    return nil // error, we can't create a named subnode on an array or field type node
-                }
-                node = child
-                continue
-            }
-            // create if does not exist
+        if __peek_token(&t).type == .EOF {
             node = append_child_node(node, prepend, allocator)
-            node.name = next
-            node.type = .OBJECT
-        } 
-        else { 
-            // terminal node
-            node = append_child_node(node, prepend, allocator)
-            node.name = next
+            node.name = next.text
             break
         }
+        
+        child, _ := find_child_node_by_name(node, next.text)
+        if child != nil {
+            if child.type != .OBJECT {
+                return nil // error, we can't create a named subnode on an array or field type node
+            }
+            node = child
+            continue
+        }
+        
+        node = append_child_node(node, prepend, allocator)
+        node.name = next.text
+        node.type = .OBJECT
     }
     
     return node
 }
 
-// if next returns empty, then there was an error and remaining is also not a valid value
-// maybe we can use the tokenizer for this
-get_next_ident_from_path_string :: proc(path: string) -> (next, remaining: string, ok: bool) {
-    if path == "" do return
-    remaining = path
-
-    defer if !ok {
-        next      = ""
-        remaining = path
+get_next_token_from_path_string :: proc(t: ^GON_Tokenizer) -> (Token, bool) {
+    next, ok := __get_token(t)
+    if !ok do return {}, false
+    
+    #partial switch next.type {
+        case .EOF, .PATH_PARENT, .PATH_HERE, .STRING: // no op
+        case: return {}, false
     }
     
-    for is_whitespace(remaining[0]) {
-        if !advance(&remaining) do return
+    #partial switch __peek_token(t).type {
+        case .EOF        : // no op
+        case .PATH_SPLIT :  __consume_token(t)
+        case             : return {}, false
     }
     
-    if remaining[0] == '\"' || remaining[0] == '\'' {
-        quote_char := remaining[0]
-        
-        if !advance(&remaining) do return
-        next = remaining[0:]
-        string_len := 0
-        
-        for remaining[0] != quote_char {
-            adv := 1 + int(remaining[0] == '\\') // TODO: handle escape sequences more properly
-            string_len += adv
-            if !advance(&remaining, adv) do return
-        }
-        next = next[:string_len]
-        if !advance(&remaining) do return
-    } else {
-        next = remaining[0:]
-        string_len := 0
-        for is_character_permitted_in_unquoted_string(remaining[0]) {
-            string_len += 1
-            if !advance(&remaining) do break // it is ok if we can't advance here, may have just hit end of path
-        }
-        next = next[:string_len]
-    }
-    
-    if next == "" do return
-    
-    if remaining != "" {
-        for is_whitespace(remaining[0]) {
-            if !advance(&remaining) {
-                ok = true
-                return
-            }
-        }
-        if remaining[0] == '/' {
-            if !advance(&remaining) do return
-        }
-    }
-    
-    ok = true
-    return
+    return next, true
 }
 
 is_character_permitted_in_unquoted_string :: proc(char: u8) -> bool {
@@ -474,11 +438,6 @@ determine_node_type_for_serialization :: proc(node: ^DOM_Node) -> Field_Type {
     we will have to insert a special condition when serializing a node to handle the custom formatting that's required for a bit set
     likewise for parsing a bit set from a dom also.
     
-    
-    Need two methods of inserting nodes into a DOM
-    1. insert a node from a field, with or without a data binding set (for parsing)
-    2. insert a node from a data_binding + name string (for serialization)
-    
 */
 
 DOM_Parser_Callback :: proc(^DOM_Node) -> bool
@@ -509,84 +468,12 @@ init_dom_parser :: proc(using parser: ^DOM_Parser, _file: string, _allocator := 
     We also don't have to split the path into substrings, since we just process it one piece at a time as we insert the binding.
 */
 add_data_binding_to_dom_parser :: proc(using parser: ^DOM_Parser, binding: any, path: string) -> bool {
-    node := find_node_by_path(parser.dom_root, path)
+    node, _ := find_node_by_path(parser.dom_root, path)
     return add_data_binding_to_node(node, binding)
     
     // should we precheck that field path is valid? will still have to verify that there are no conflicts later on
     // we will detect conflicts when actually creating the bindings to the DOM, since we can't just textually compare field paths trivially, and I don't want to do it that way anyhow
 }
-
-/*
-    Steps in parsing:
-    
-    read tokens and append all nodes
-    insert data bindings into dom nodes
-        check data type compatibility
-        maybe we should actually go ahead and set any data binding values that we can while we are here?
-            because we already have to allocate space for values in dynamic arrays and such so that we can create all the indirect bindings to child nodes
-            it doesn't necessarily matter that we check everything before making any allocations, so long as we keep a list of the allocations we make so that we can free everything when an error occurs
-                but that list itself will require more allocations, albeit temporary ones
-            one way we could maybe reduce the size of the dom node struct is to store a *node in the data binding instead of duplicating the binding data in the node
-                this would acutally use less memory overall anyhow, since the node has to store pointer + typeid for the binding
-                the inconvenience here maybe is that we can't walk the dom and see the bindings, we would have to linear search the bindings array for a match to the current node
-                    which could possibly be bad for callbacks that want to do things with the dom nodes? if we even do that...
-                this would also allow for having multiple bindings to the same node, which could be fine/useful even
-                    e.g. two entity templates bind to the same base template object and then also bind to individual objects that override particular members
-                        seems like kind of a weird meta solution that just takes advantage of how the parser is structured
-                        this could also be acheived in gon syntax with field refs, probably
-                            just opens up the can of worms of $ working on objects
-                we could store any field ref for data dependency on the binding as well
-                one major problem is that if we aren't walking the dom in order to visit nodes, 
-                    resolving data dependencies becomes far more complicated because we have to worry about 
-                    ok, so maybe this is actually a reason that we want to perform all allocations before setting any data, 
-            short answer, no because of field ref evaluation
-        if value uses field reference, save this and resolve later
-        
-    resolve field references / data dependencies
-        it's possible there's a circular dependency in which case we should error
-        better to do this before setting any values, the idea is that every thing is correct before we start allocating
-            moot point, we have to allocate in order to make the indirect data data bindings earlier in the process
-            
-    set data from text values of fields
-        run callbacks when walking dom similar to what we have in sax mode
-    
-    the issue of field refs
-    
-    i want a gon file to be totally statically defined such that the order of evaluation of the data bindings in the file does not matter
-    or well, i dont actually know, but we need to have a well defined answer for the order of evaluation here if there are going to be data dependencies between fields
-    
-    and the answer will depend on whether we decied to finalize data bindings by walking the dom in order or by following the order in which data bindings are appended.
-    also on what is the procedure for resolving individual data dependencies 
-    
-    orig plan to resolve a field ref is to just jump to a field in the dom when referenced and try to get the value needed from it
-        if that node then needs to be resolved, then we just jump to the next node and repeat
-        will have to pass orig node so that we know when we hit a circular dependency
-        this jumping between nodes will require that we have space already allocated for the values produced by resolving some node
-            not for the * and & refs, but for $ refs, unless we restrict that $ is only used to reference simple fields
-            if we allow $ to be used with object / array types, that's really what creates the entire issue here,
-                because then we are reliant on everything within that object being resolved, which is where we could hit weird ordering issues
-        if this process is completely nonlinear, then maybe it doesn't matter if the data binding process is linear?
-    
-    if we want to be able to jump around the file to resolve field refs, then we need all the data bindings to be in place first
-    so we do at least need to have the separation between the step of putting the bindings on the fields and actually processing the bindings
-    
-    we will need to set a flag on nodes when data binding has been resolved, or just remove the binding data from the node
-        otherwise, we could repeat work on an already processed node that we had previously jumped to as a field ref
-    
-    how to handle field refs structurally in dom node?
-    if something uses a ref, we don't actually know the type of the node yet
-    maybe we consider this its own type? 
-    still havent figured out syntax for object/array that uses field ref
-        for objects, would be nice to do field ref + more data
-            if we do that though, we run into a question of whether or not to deep copy or shallow copy structures
-        getting field ref from an array doesn't really seem to make any sense
-            then again, e.g. the animation frames arrays for entity templates, where I wanted to do 
-                shallow copy of walk to jump and fall
-                deep copy of green koopa with offsets added to frames
-
-    
-*/
-
 
 /*
     Callbacks for the DOM parser
@@ -624,6 +511,7 @@ add_data_binding_to_dom_parser :: proc(using parser: ^DOM_Parser, binding: any, 
             - indexing normal arrays with enums?
                 - just add enum typeid in io_data for array ezpz
             - field refs
+                - traverse nodes by relative field path
                 - get index (parent must be array)
                 - get binding pointer
                 - get binding value
@@ -633,29 +521,84 @@ add_data_binding_to_dom_parser :: proc(using parser: ^DOM_Parser, binding: any, 
         serialization
             + plain old data, default formatting
             - sameline flag with somewhat intelligent defaults
+            - indexed arrays
             - callbacks / fully custom formatting
+    
         
+        
+    field references
+    
+    value and index are working at a basic level now
+    
+    would be nice to have for objects, but this would require modifications
+        need to store ref path separate from value text maybe?
+            could reuse value text and just remove from the union, or we keep that in union bc why not and just add the new data
+        gets weird when parent is array
+        do we need additional syntax for saying that an object should use a reference and also have additional overriding values?
+        need to figure out shallow copy vs deep copy semantics, $ vs $$ ?
+        
+    
 */
 
-process_node_bindings :: proc(using parser: ^DOM_Parser, node: ^DOM_Node) -> bool {
-    for child := node.first; child != nil; child = child.next {
-        for callback in callbacks {
-            if callback != nil {
-                if !callback(child) {
-                    return false
-                }
-            }
-        }
+process_node_binding :: proc(using parser: ^DOM_Parser, node: ^DOM_Node) -> bool {
+    if .BINDING_RESOLVED in node.flags do return true
     
-        if child.type == .OBJECT || child.type == .ARRAY {
-            process_node_bindings(parser, child)
-        } else {
-            // TODO: insert handling for field refs here
-            if !set_value_from_string(child.data_binding, child.text) {
+    for callback in callbacks {
+        if callback != nil {
+            if !callback(node) {
                 return false
             }
         }
     }
+    
+    if node.type == .OBJECT || node.type == .ARRAY {
+        for child := node.first; child != nil; child = child.next {
+            if !process_node_binding(parser, child) {
+                return false
+            }
+        }
+    }
+    else {
+        if node.data_binding.data == nil do return true
+        
+        if .REF_INDEX in node.flags {
+            if node.text == "" do return true
+            is_relative_path := node.text[0] == '.'
+            ref_node, index := find_node_by_path(is_relative_path ? node.parent : parser.dom_root, node.text)
+            if ref_node == nil do return true
+            if !dynamic_int_cast(node.data_binding, index) do return true
+        } 
+        else if .REF_VALUE in node.flags {
+            if node.text == "" do return true
+            is_relative_path := node.text[0] == '.'
+            ref_node, _ := find_node_by_path(is_relative_path ? node.parent : parser.dom_root, node.text)
+            if ref_node == nil do return true
+            
+            // if the referenced node has a data binding, jump there to resolve it and then pull the value from it directly
+            // otherwise, just get the text and assign it as normal
+            if ref_node.data_binding.data != nil {
+                if ref_node.data_binding.id != node.data_binding.id {
+                    return false
+                }
+                if !process_node_binding(parser, ref_node) {
+                    return false
+                }
+                // what if we want to clone string rather than shallow copy? (should probably be a dom node flag)
+                mem.copy(node.data_binding.data, ref_node.data_binding.data, type_info_of(node.data_binding.id).size)
+            } else {
+                if !set_value_from_string(node.data_binding, ref_node.text) {
+                    return false
+                }
+            }
+        }
+        else {
+            if !set_value_from_string(node.data_binding, node.text) {
+                return false
+            }
+        }
+    }
+    
+    node.flags |= {.BINDING_RESOLVED}
     return true
 }
 
@@ -678,14 +621,6 @@ construct_dom_from_gon_file :: proc(t: ^GON_Tokenizer) -> (^DOM_Node) {
         name, text : string
         type  : Field_Type
         flags : DOM_Node_Flags
-        
-        // check for field refs
-        next_token = __peek_token(t)
-        #partial switch next_token.type {
-            case .REF_INDEX:
-                flags |= {.REF_INDEX}
-                if !__consume_token(t) do return nil
-        }
         
         // read field name
         if parent.type != .ARRAY {
@@ -714,6 +649,20 @@ construct_dom_from_gon_file :: proc(t: ^GON_Tokenizer) -> (^DOM_Node) {
                     fmt.printfln("GON parse error: Unexpected %v token \"%v\".", next_token.type, next_token.text)
                     return nil
             }
+        }
+        
+        // check for field refs
+        next_token = __peek_token(t)
+        #partial switch next_token.type {
+            case .REF_INDEX:
+                flags |= {.REF_INDEX}
+                if !__consume_token(t) do return nil
+            case .REF_POINTER:
+                flags |= {.REF_POINTER}
+                if !__consume_token(t) do return nil
+            case .REF_VALUE:
+                flags |= {.REF_VALUE}
+                if !__consume_token(t) do return nil
         }
 
         // read field value
@@ -745,8 +694,9 @@ construct_dom_from_gon_file :: proc(t: ^GON_Tokenizer) -> (^DOM_Node) {
         assert(type != .INVALID)
         
         node := append_child_node(parent)
-        node.name = name
-        node.type = type
+        node.name  = name
+        node.type  = type
+        node.flags = flags
         if node.type == .OBJECT || node.type == .ARRAY {
             parent = node
         } else {
@@ -1115,8 +1065,17 @@ is_binding_valid :: proc(node: ^DOM_Node, binding: any) -> bool {
     return false
 }
 
-// current iteration of tokenizer proc, need to clean up the others later
-// we may be able to consolidate these and just have a peek bool param, assuming that's acutally better somehow
+/*
+    current iteration of tokenizer proc, need to clean up the others later
+    not sure how people usually do this actually
+    
+    here we actually consume tokens 1 ahead of whatever is actually returned by get_token
+    so we basically buffer up a token so that we can always peek a token and don't parse it out multiple times
+    this is ideal for parsing out actual gon files, but wouldn't be for parsing the path strings
+    in that case, we can just use lex_next_token directly
+    
+    the tokenizer is basically just there to act as a very thin wrapper for lex_next_token so that we don't have to think about managing state for peeking tokens pin the main parse proc
+*/
 
 __consume_token :: proc(using t: ^GON_Tokenizer) -> bool {
     if next_token.type == .EOF do return true
@@ -1138,7 +1097,7 @@ __peek_token :: proc(using t: ^GON_Tokenizer) -> Token {
 lex_next_token :: proc(file: ^string) -> (Token, bool) {
     if len(file^) <= 0                     do return {.EOF, ""}, true
     if !skip_whitespace_and_comments(file) do return {.EOF, ""}, true
-  
+    
     switch file^[0] {
         case '{':
             advance(file)
@@ -1155,9 +1114,13 @@ lex_next_token :: proc(file: ^string) -> (Token, bool) {
         case '&':
             advance(file)
             return {.REF_INDEX, ""}, true
+        case '*':
+            advance(file)
+            return {.REF_POINTER, ""}, true
+        case '$':
+            advance(file)
+            return {.REF_VALUE, ""}, true
     }
-  
-    
     
     is_numeric :: proc(char: u8) -> bool {
         return char >= '0' && char <='9'
@@ -1167,7 +1130,24 @@ lex_next_token :: proc(file: ^string) -> (Token, bool) {
         return (char >= 'a' && char <='z' ) || (char >= 'A' && char <='Z')
     }
     
-    if file^[0] == '\"' || file^[0] == '\'' { // quoted strings
+    // tokens only used in path strings, maybe we have a param to skip these when not parsing for a path
+    if file^[0] == '/' {
+        advance(file)
+        return {.PATH_SPLIT, ""}, true
+    }
+    
+    // not very correct, but whatever for now
+    if file^[0] == '.' {
+        type := Token_Type.PATH_HERE
+        if advance(file) && file^[0] == '.' {
+            type = .PATH_PARENT
+            advance(file)
+        }
+        return {type, ""}, true
+    }
+    
+    // quoted strings
+    if file^[0] == '"' || file^[0] == '\'' || file^[0] == '`' { 
         quote_char := file^[0]
         
         if !advance(file) do return {.EOF, ""}, false
@@ -1183,7 +1163,9 @@ lex_next_token :: proc(file: ^string) -> (Token, bool) {
         
         return {.STRING, string_value[:string_len]}, true
     }
-    else if is_numeric(file^[0]) || file^[0] == '-' { // number
+    
+    // number
+    if is_numeric(file^[0]) || file^[0] == '-' { 
         string_value := file^[0:]
         string_len := 0
         
@@ -1204,7 +1186,9 @@ lex_next_token :: proc(file: ^string) -> (Token, bool) {
         
         return {.STRING, string_value[:string_len]}, true
     }
-    else if is_alpha(file^[0]) || file^[0] == '_' { // identifier
+    
+    // identifier
+    if is_alpha(file^[0]) || file^[0] == '_' {
         string_value := file^[0:]
         string_len := 0
         

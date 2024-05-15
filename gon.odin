@@ -44,6 +44,9 @@ Token_Type :: enum {
     REF_INDEX,
     REF_POINTER,
     REF_VALUE,
+    PATH_SPLIT,
+    PATH_HERE,
+    PATH_PARENT,
     EOF,
 }
 

@@ -680,3 +680,75 @@ As it stands now, callbacks have access to all information that the SAX parser i
     peope should simply not write code that will introduce bugs, the parser is simple enough and following some very basic conventions should prevent bugs from arising
 
 
+
+
+Old notes moved from dom_new file, probably not useful anymore:
+
+    Steps in parsing:
+    
+    read tokens and append all nodes
+    insert data bindings into dom nodes
+        check data type compatibility
+        maybe we should actually go ahead and set any data binding values that we can while we are here?
+            because we already have to allocate space for values in dynamic arrays and such so that we can create all the indirect bindings to child nodes
+            it doesn't necessarily matter that we check everything before making any allocations, so long as we keep a list of the allocations we make so that we can free everything when an error occurs
+                but that list itself will require more allocations, albeit temporary ones
+            one way we could maybe reduce the size of the dom node struct is to store a *node in the data binding instead of duplicating the binding data in the node
+                this would acutally use less memory overall anyhow, since the node has to store pointer + typeid for the binding
+                the inconvenience here maybe is that we can't walk the dom and see the bindings, we would have to linear search the bindings array for a match to the current node
+                    which could possibly be bad for callbacks that want to do things with the dom nodes? if we even do that...
+                this would also allow for having multiple bindings to the same node, which could be fine/useful even
+                    e.g. two entity templates bind to the same base template object and then also bind to individual objects that override particular members
+                        seems like kind of a weird meta solution that just takes advantage of how the parser is structured
+                        this could also be acheived in gon syntax with field refs, probably
+                            just opens up the can of worms of $ working on objects
+                we could store any field ref for data dependency on the binding as well
+                one major problem is that if we aren't walking the dom in order to visit nodes, 
+                    resolving data dependencies becomes far more complicated because we have to worry about 
+                    ok, so maybe this is actually a reason that we want to perform all allocations before setting any data, 
+            short answer, no because of field ref evaluation
+        if value uses field reference, save this and resolve later
+        
+    resolve field references / data dependencies
+        it's possible there's a circular dependency in which case we should error
+        better to do this before setting any values, the idea is that every thing is correct before we start allocating
+            moot point, we have to allocate in order to make the indirect data data bindings earlier in the process
+            
+    set data from text values of fields
+        run callbacks when walking dom similar to what we have in sax mode
+    
+    the issue of field refs
+    
+    i want a gon file to be totally statically defined such that the order of evaluation of the data bindings in the file does not matter
+    or well, i dont actually know, but we need to have a well defined answer for the order of evaluation here if there are going to be data dependencies between fields
+    
+    and the answer will depend on whether we decied to finalize data bindings by walking the dom in order or by following the order in which data bindings are appended.
+    also on what is the procedure for resolving individual data dependencies 
+    
+    orig plan to resolve a field ref is to just jump to a field in the dom when referenced and try to get the value needed from it
+        if that node then needs to be resolved, then we just jump to the next node and repeat
+        will have to pass orig node so that we know when we hit a circular dependency
+        this jumping between nodes will require that we have space already allocated for the values produced by resolving some node
+            not for the * and & refs, but for $ refs, unless we restrict that $ is only used to reference simple fields
+            if we allow $ to be used with object / array types, that's really what creates the entire issue here,
+                because then we are reliant on everything within that object being resolved, which is where we could hit weird ordering issues
+        if this process is completely nonlinear, then maybe it doesn't matter if the data binding process is linear?
+    
+    if we want to be able to jump around the file to resolve field refs, then we need all the data bindings to be in place first
+    so we do at least need to have the separation between the step of putting the bindings on the fields and actually processing the bindings
+    
+    we will need to set a flag on nodes when data binding has been resolved, or just remove the binding data from the node
+        otherwise, we could repeat work on an already processed node that we had previously jumped to as a field ref
+    
+    how to handle field refs structurally in dom node?
+    if something uses a ref, we don't actually know the type of the node yet
+    maybe we consider this its own type? 
+    still havent figured out syntax for object/array that uses field ref
+        for objects, would be nice to do field ref + more data
+            if we do that though, we run into a question of whether or not to deep copy or shallow copy structures
+        getting field ref from an array doesn't really seem to make any sense
+            then again, e.g. the animation frames arrays for entity templates, where I wanted to do 
+                shallow copy of walk to jump and fall
+                deep copy of green koopa with offsets added to frames
+
+
