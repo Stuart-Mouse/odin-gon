@@ -55,6 +55,7 @@ Field_Type :: enum {
     FIELD   = 1,
     OBJECT  = 2, 
     ARRAY   = 3,
+    REF     = 4,
     // maybe add ATTRIBUTE type? would be implicitly convertible to FIELD during parsing, could add formatting options specific to 
     // parsing in attributes is more straightforward. serializing them out to XML is where things get less nice.
 }

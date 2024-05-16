@@ -11,8 +11,9 @@ import "core:math"
 
 /*
     After getting some of the basic stuff working for the DOM thing, I may be able to use it to generate parsing procedures for binary data as well.
-    and perhaps this could as do things like manage versioning of structs, etc.
+    and perhaps this could also do things like manage versioning of structs, etc.
 */
+
 
 INDENTATION_STRING := "    "
 
@@ -32,6 +33,8 @@ DOM_Node_Flag  :: enum {
     REF_INDEX,
     REF_POINTER,
     REF_VALUE,
+    
+    BIND_PARENT, // used to indicate that a field assumes the parent object's binding, used for special field value ref syntax
 
     // formatting flags
     SAME_LINE,
@@ -47,17 +50,22 @@ DOM_Node :: struct {
     // source_location: struct { line, char: int },
 
     name         : string,
-    // name_token_type : Token_Type,
+    // name         : Token,
     
     data_binding : any,
     flags        : DOM_Node_Flags,
     
     type         : Field_Type,
     
-    // value is text for .FIELD, value is children for .OBJECT and .ARRAY
     using value: struct #raw_union {
-        text : string,
-        // text_token_type: Token_Type, 
+        ref: struct {
+            node: ^DOM_Node,
+            type: enum { VALUE, POINTER, INDEX },
+        },
+    
+        text: string, 
+        // text: Token, // will replace with token later, should do the same for name
+        
         using children: struct { 
             first : ^DOM_Node,
             last  : ^DOM_Node,
@@ -511,10 +519,10 @@ add_data_binding_to_dom_parser :: proc(using parser: ^DOM_Parser, binding: any, 
             - indexing normal arrays with enums?
                 - just add enum typeid in io_data for array ezpz
             - field refs
-                - traverse nodes by relative field path
-                - get index (parent must be array)
+                + traverse nodes by relative field path
+                + get index (parent must be array)
+                + get binding value / or fallback to string value
                 - get binding pointer
-                - get binding value
             - callbacks / fully custom formatting
             - expression evaluation with lead sheets integration
             
@@ -523,8 +531,6 @@ add_data_binding_to_dom_parser :: proc(using parser: ^DOM_Parser, binding: any, 
             - sameline flag with somewhat intelligent defaults
             - indexed arrays
             - callbacks / fully custom formatting
-    
-        
         
     field references
     
@@ -538,7 +544,128 @@ add_data_binding_to_dom_parser :: proc(using parser: ^DOM_Parser, binding: any, 
         need to figure out shallow copy vs deep copy semantics, $ vs $$ ?
         
     
+    
+    ok, what if...
+    
+    what if we don't actually store the indirect data bindings on the dom node, just evaluate in immediate mode, BUT
+    
+    we can modify the dom to capture the data dependencies
+    
+    
+    there are natural dependencies that exist based on the strucutre of the dom
+    every parent node has a dependency on its child nodes
+    the major difference though, is that unlike the parent/child relation which is one-to-many, the refnode relation is many-to-one
+    when we jump to a ref node, we are doing the equivalent of just copying all those nodes recursively and attaching them in the calling node's location
+    a circular dependency would result in infinitely appending nodes to the dom, if we handled it that way
+    we also don't want to resolve bindings on a node more than once if possible
+    
+    
+    
+    flagging direct bindings
+    
+    
+    only value refs impose any data dependencies
+        index is always known 
+        pointer relies on ref node having a data binding, otherwise its not really comprehensible
+    for value ref, two possible cases,
+        either there is a data binding there
+        or there's not
+    if ref node is field, there's no issue, because we can just retreive the string value and call it a day
+        perhaps we should even resolve these simple cases before processing bindings
+        
+    before knowing bindings, we can check that special parent-bind object ref node thingies refer to an object node
+        and thats about it
+    
+    currently, we are resolving references after making bindings, maybe we want to do this before
+        so we don't allocate before we know the dom itself is valid
+        but then we won't have bindings for type info
+            cannot determine ahead of time if pointer ref is valid, as this depends on types of bindings
+        can resolve refs to .FIELDs by simply overriding the type and value of the node with that of ref node
+        maybe short term for objects we just duplicate the node and insert them into the object
+            this is just the most simple solution
+    
+    I stil have no idea what to do for arrays, or if that is even valuable. 
+    weirdly, whether this method of object ref'ing its not a matter of struct vs array internally, but whether it is an object or array in the gon text
+    so you could use the same syntax for a map or array to include the contents of another map/array
+    short term, maybe we restrict it to only operate on structs, see how it goes
+    
+    
+    restructuring TODO:
+    convert .FIELDs to .REF based on flag set in construct_dom...
+    resolve references on the nodes before inserting bindings
+        check for circular dependencies
+        copy / overwrite nodes as needed (figure out something better later, just make it work and stop being autistic about it)
+    --- by the time we are here, the file should be internally textually correct 
+        more or less, perhaps we also want to have checks in future for heterogeneity of arrays or something
+    insert data bindings
+    process data bindings
+    
+    
+    
 */
+
+validate_node_references :: proc(using parser: ^DOM_Parser) -> bool {
+    // wraps dom node so that we do not need to store dependent on the node itself, we can store on the stack instead.
+    // then callee can traverse up the chain of dependent nodes to check for cycles
+    Dependency_Node :: struct {
+        node      : ^DOM_Node,
+        dependent : ^Dependency_Node,
+    }
+    
+    // we only push a dependency when we jump to a ref node
+    check_node_for_dependency_cycle :: proc(using parser: ^DOM_Parser, using dep_node: ^Dependency_Node) -> bool {
+        d := dependent
+        for d != nil {
+            if node == d.node {
+                fmt.println("Circular dependency found on nodes:")
+                _d := dependent
+                for _d != nil {
+                    fmt.printfln("\t%v", _d.node.name)
+                    _d = _d.dependent
+                }
+                return false
+            }
+            d = d.dependent
+        }
+        
+        if node.type == .OBJECT || node.type == .ARRAY {
+            for child := node.first; child != nil; child = child.next {
+                if !check_node_for_dependency_cycle(parser, &{ child, dependent }) {
+                    return false
+                }
+            }
+        } else {
+            if .REF_VALUE in node.flags {
+                if node.text == "" {
+                    fmt.printfln("Empty reference on node '%v'.", node.name) // TODO: node path
+                    return false
+                }
+                
+                is_relative_path := node.text[0] == '.'
+                ref_node, _ := find_node_by_path(is_relative_path ? node.parent : parser.dom_root, node.text)
+                
+                if ref_node == nil {
+                    fmt.printfln("Invalid reference on node '%v'.", node.name) // TODO: node path
+                    return false
+                }
+                
+                if !check_node_for_dependency_cycle(parser, &{ ref_node, dep_node }) {
+                    return false
+                }
+            }
+        }
+        
+        return true
+    }
+    
+    for child := parser.dom_root.first; child != nil; child = child.next {
+        if !check_node_for_dependency_cycle(parser, &{ parser.dom_root, nil }) {
+            return false
+        }
+    }
+    
+    return true
+}
 
 process_node_binding :: proc(using parser: ^DOM_Parser, node: ^DOM_Node) -> bool {
     if .BINDING_RESOLVED in node.flags do return true
@@ -575,17 +702,49 @@ process_node_binding :: proc(using parser: ^DOM_Parser, node: ^DOM_Node) -> bool
             if ref_node == nil do return true
             
             // if the referenced node has a data binding, jump there to resolve it and then pull the value from it directly
-            // otherwise, just get the text and assign it as normal
-            if ref_node.data_binding.data != nil {
-                if ref_node.data_binding.id != node.data_binding.id {
-                    return false
-                }
-                if !process_node_binding(parser, ref_node) {
-                    return false
-                }
-                // what if we want to clone string rather than shallow copy? (should probably be a dom node flag)
-                mem.copy(node.data_binding.data, ref_node.data_binding.data, type_info_of(node.data_binding.id).size)
-            } else {
+            // otherwise, if it is a field, we can just get the text and assign it as normal as fallback measure
+            
+            // we have another problem here with objects, because we can only create a reference to an object that has a data binding
+                // we could copy the entire subtree of the referenced object and create bindings to it as normal
+                    // would use up much more memory
+                    // most simple thing to do
+                // we could make a temp binding and evaluate bindings in a sort of immediate mode?
+                    // if we have multiple things that reference the same base object, we will be repeating a lot of work 
+                    // we don't have a mechanism to make bindings and immediately evaluate them
+                        // would probably not play nice with the rest of the system
+                    // would need mechanism to remove the bindings after they are resolved
+                        // while resolving, if we jumped to another ref, and then that pointed back into this object, but not to the same node, it would see a binding there
+                // we could allocate space for a temp struct, bind the object to that, and then copy from that?
+                    // we fundamentally can't really impose a type on data without a direct data binding
+                        // we could assume the type of the first object to reference this one and assert that future things that ref to this object match the imposed type
+                        // but that feels kind of bad and prevents it from working with usings
+                    // but we can't exactly just memcopy for structs anyhow, so maybe it is better if we actually navigate the whole structure.
+                    // if we shallow copy from a temp allocated thing, we will have big problems
+                        // could just force a deep copy on temp objects, but maybe we want things to reference the same underlying data?
+                        // I want there to be as much flexibility as possible in how the user can have their data be allocated
+            
+            // if ref_node.data_binding.data != nil {
+            //     // later, we may want to make this more type matching more sophisticated, and work with usings on structs
+            //     // for now, user can handle that manually
+            //     if ref_node.data_binding.id != node.data_binding.id {
+            //         return false
+            //     }
+            //     if !process_node_binding(parser, ref_node) {
+            //         return false
+            //     }
+                
+            //     // Problem! this mem copy won't allow us to have an object ref multiple other objects properly
+            //     // maybe we can return a bitmap of the fields of a struct that get set when processing the binding?
+            //     // also, this definitely won't work for arrays.
+            //     // unfortunately, we may need a whole big switch case here for copying values
+            //     // seems like switch cases end up being the largest source of code in this entire library
+            //     // fortunately, these will probably be a little bit smaller in Jai due to the more simple type system
+                
+            //     // what if we want to clone string rather than shallow copy? (should probably be a dom node flag)
+            //     mem.copy(node.data_binding.data, ref_node.data_binding.data, type_info_of(node.data_binding.id).size)
+            // }
+            
+            if ref_node.type == .FIELD {
                 if !set_value_from_string(node.data_binding, ref_node.text) {
                     return false
                 }
@@ -598,7 +757,6 @@ process_node_binding :: proc(using parser: ^DOM_Parser, node: ^DOM_Node) -> bool
         }
     }
     
-    node.flags |= {.BINDING_RESOLVED}
     return true
 }
 
@@ -622,45 +780,53 @@ construct_dom_from_gon_file :: proc(t: ^GON_Tokenizer) -> (^DOM_Node) {
         type  : Field_Type
         flags : DOM_Node_Flags
         
-        // read field name
-        if parent.type != .ARRAY {
-            next_token, ok = __get_token(t)
-            if !ok {
-                fmt.printfln("GON tokenization error: Unexpected %v token \"%v\".", next_token.type, next_token.text)
-                return nil
-            }
-            #partial switch next_token.type {
-                case .STRING: 
-                    name = next_token.text
-                case .EOF:
-                    if parent != root {
-                        fmt.printfln("GON parse error: Unexpected %v token \"%v\".", next_token.type, next_token.text)
-                        return nil
-                    }
-                    break L_Loop
-                case .OBJECT_END:
-                    if parent.type != .OBJECT {
-                        fmt.printfln("GON parse error: Unexpected %v token \"%v\".", next_token.type, next_token.text)
-                        return nil
-                    }
-                    parent = parent.parent
-                    continue
-                case:
-                    fmt.printfln("GON parse error: Unexpected %v token \"%v\".", next_token.type, next_token.text)
+        // field value ref without name inside an object will create an unnamed field with the same data binding as the parent object
+        if parent.type == .OBJECT && __peek_token(t).type == .REF_VALUE {
+            flags |= {.BIND_PARENT}
+        } else {
+            // read field name
+            if parent.type != .ARRAY {
+                next_token, ok = __get_token(t)
+                if !ok {
+                    fmt.printfln("GON tokenization error: Unexpected %v token \"%v\".", next_token.type, next_token.text)
                     return nil
+                }
+                #partial switch next_token.type {
+                    case .STRING: 
+                        name = next_token.text
+                    case .EOF:
+                        if parent != root {
+                            fmt.printfln("GON parse error: Unexpected %v token \"%v\".", next_token.type, next_token.text)
+                            return nil
+                        }
+                        break L_Loop
+                    case .OBJECT_END:
+                        if parent.type != .OBJECT {
+                            fmt.printfln("GON parse error: Unexpected %v token \"%v\".", next_token.type, next_token.text)
+                            return nil
+                        }
+                        parent = parent.parent
+                        continue
+                    case:
+                        fmt.printfln("GON parse error: Unexpected %v token \"%v\".", next_token.type, next_token.text)
+                        return nil
+                }
             }
         }
         
         // check for field refs
-        next_token = __peek_token(t)
-        #partial switch next_token.type {
+        has_ref := false
+        #partial switch __peek_token(t).type {
             case .REF_INDEX:
+                has_ref = true
                 flags |= {.REF_INDEX}
                 if !__consume_token(t) do return nil
             case .REF_POINTER:
+                has_ref = true
                 flags |= {.REF_POINTER}
                 if !__consume_token(t) do return nil
             case .REF_VALUE:
+                has_ref = true
                 flags |= {.REF_VALUE}
                 if !__consume_token(t) do return nil
         }
@@ -692,6 +858,10 @@ construct_dom_from_gon_file :: proc(t: ^GON_Tokenizer) -> (^DOM_Node) {
         }
         
         assert(type != .INVALID)
+        if has_ref && type != .FIELD {
+            fmt.printfln("GON parse error: Field ref token '%v' must be followed by a field path string.", next_token.type, next_token.text)
+            return nil
+        }
         
         node := append_child_node(parent)
         node.name  = name
@@ -724,6 +894,12 @@ add_data_binding_to_node :: proc(node: ^DOM_Node, binding: any) -> bool  {
     // make indirect bindings onto child nodes
     #partial switch node.type {
         case .OBJECT:
+            for child := node.first; child != nil; child = child.next {
+                if .BIND_PARENT in child.flags { // necessarily a field and value ref
+                    child.data_binding = node.data_binding
+                }
+            }
+    
             #partial switch tiv in binding_ti.variant {
                 case runtime.Type_Info_Struct:
                     for child := node.first; child != nil; child = child.next {
@@ -979,7 +1155,6 @@ add_data_binding_to_node :: proc(node: ^DOM_Node, binding: any) -> bool  {
     
     return true
 }
-
 
 is_binding_valid :: proc(node: ^DOM_Node, binding: any) -> bool {
     binding_ti := runtime.type_info_base(type_info_of(binding.id))
