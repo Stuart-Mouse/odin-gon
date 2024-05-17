@@ -27,18 +27,15 @@ DOM_Node_Flag  :: enum {
     ARRAY_INDEXED,
     ARRAY_ENUMERATED,
     
-    // flags to denote that node is a reference to another node
-    // should be mutually exclusive in practice, but I don't want to introduce a reftype enum
-    // maybe we change this later if we can keep dom_node_flags as u8 or other smaller type and reftype as u8
-    REF_INDEX,
-    REF_POINTER,
-    REF_VALUE,
+    REFERENCE,
     
     BIND_PARENT, // used to indicate that a field assumes the parent object's binding, used for special field value ref syntax
 
     // formatting flags
     SAME_LINE,
 }
+
+DOM_Node_Ref_Type :: enum u8 { VALUE, POINTER, INDEX }
 
 // this struct is kinda big
 // maybe we optimize this later, but for now just making it work
@@ -51,20 +48,19 @@ DOM_Node :: struct {
 
     name         : string,
     // name         : Token,
-    
-    data_binding : any,
-    flags        : DOM_Node_Flags,
-    
     type         : Field_Type,
+    flags        : DOM_Node_Flags,
+    data_binding : any,
     
-    using value: struct #raw_union {
+    using content: struct #raw_union {
         ref: struct {
-            node: ^DOM_Node,
-            type: enum { VALUE, POINTER, INDEX },
+            text : string, 
+            node : ^DOM_Node,
+            type : DOM_Node_Ref_Type,
         },
-    
+        
         text: string, 
-        // text: Token, // will replace with token later, should do the same for name
+        // value: Token, // will replace with token later, should do the same for name
         
         using children: struct { 
             first : ^DOM_Node,
@@ -317,6 +313,40 @@ append_node_with_path :: proc(parent: ^DOM_Node, path: string = "", prepend := f
     return node
 }
 
+clone_child_nodes_recursive :: proc(dst: ^DOM_Node, src: ^DOM_Node, allocator := context.allocator) -> bool {
+    for child := src.first; child != nil; child = child.next {
+        node := append_child_node(dst, false, allocator)
+        if !clone_node_recursive(node, child) do return false
+    }
+    return true
+}
+
+clone_node_recursive :: proc(dst: ^DOM_Node, src: ^DOM_Node, allocator := context.allocator) -> bool {    
+    if dst.type == .OBJECT {
+        delete_child_nodes_recursive(dst)
+    }
+
+    dst.name         = src.name
+    dst.type         = src.type
+    dst.flags        = src.flags
+    dst.data_binding = src.data_binding
+    dst.content      = {}
+
+    switch src.type {
+        case .OBJECT, .ARRAY:
+            return clone_child_nodes_recursive(dst, src, allocator)
+        case .REF:
+            dst.ref = src.ref
+            fmt.println("cloned a ref node...")
+        case .FIELD:
+            dst.text = src.text
+        case .INVALID:
+            return false
+    }
+    
+    return true
+}
+
 get_next_token_from_path_string :: proc(t: ^GON_Tokenizer) -> (Token, bool) {
     next, ok := __get_token(t)
     if !ok do return {}, false
@@ -545,14 +575,57 @@ add_data_binding_to_dom_parser :: proc(using parser: ^DOM_Parser, binding: any, 
         
     
     
+    
+    // if the referenced node has a data binding, jump there to resolve it and then pull the value from it directly
+    // otherwise, if it is a field, we can just get the text and assign it as normal as fallback measure
+    
+    // we have another problem here with objects, because we can only create a reference to an object that has a data binding
+        // we could copy the entire subtree of the referenced object and create bindings to it as normal
+            // would use up much more memory
+            // most simple thing to do
+        // we could make a temp binding and evaluate bindings in a sort of immediate mode?
+            // if we have multiple things that reference the same base object, we will be repeating a lot of work 
+            // we don't have a mechanism to make bindings and immediately evaluate them
+                // would probably not play nice with the rest of the system
+            // would need mechanism to remove the bindings after they are resolved
+                // while resolving, if we jumped to another ref, and then that pointed back into this object, but not to the same node, it would see a binding there
+        // we could allocate space for a temp struct, bind the object to that, and then copy from that?
+            // we fundamentally can't really impose a type on data without a direct data binding
+                // we could assume the type of the first object to reference this one and assert that future things that ref to this object match the imposed type
+                // but that feels kind of bad and prevents it from working with usings
+            // but we can't exactly just memcopy for structs anyhow, so maybe it is better if we actually navigate the whole structure.
+            // if we shallow copy from a temp allocated thing, we will have big problems
+                // could just force a deep copy on temp objects, but maybe we want things to reference the same underlying data?
+                // I want there to be as much flexibility as possible in how the user can have their data be allocated
+    
+    // if ref_node.data_binding.data != nil {
+    //     // later, we may want to make this more type matching more sophisticated, and work with usings on structs
+    //     // for now, user can handle that manually
+    //     if ref_node.data_binding.id != node.data_binding.id {
+    //         return false
+    //     }
+    //     if !process_node_binding(parser, ref_node) {
+    //         return false
+    //     }
+        
+    //     // Problem! this mem copy won't allow us to have an object ref multiple other objects properly
+    //     // maybe we can return a bitmap of the fields of a struct that get set when processing the binding?
+    //     // also, this definitely won't work for arrays.
+    //     // unfortunately, we may need a whole big switch case here for copying values
+    //     // seems like switch cases end up being the largest source of code in this entire library
+    //     // fortunately, these will probably be a little bit smaller in Jai due to the more simple type system
+        
+    //     // what if we want to clone string rather than shallow copy? (should probably be a dom node flag)
+    //     mem.copy(node.data_binding.data, ref_node.data_binding.data, type_info_of(node.data_binding.id).size)
+    // }
+    
+    
     ok, what if...
-    
-    what if we don't actually store the indirect data bindings on the dom node, just evaluate in immediate mode, BUT
-    
+    what if we don't actually store the indirect data bindings on the dom node, just evaluate in immediate mode, 
+    BUT
     we can modify the dom to capture the data dependencies
     
-    
-    there are natural dependencies that exist based on the strucutre of the dom
+    there are natural dependencies that exist based on the structure of the dom
     every parent node has a dependency on its child nodes
     the major difference though, is that unlike the parent/child relation which is one-to-many, the refnode relation is many-to-one
     when we jump to a ref node, we are doing the equivalent of just copying all those nodes recursively and attaching them in the calling node's location
@@ -628,14 +701,14 @@ validate_node_references :: proc(using parser: ^DOM_Parser) -> bool {
             d = d.dependent
         }
         
-        if node.type == .OBJECT || node.type == .ARRAY {
-            for child := node.first; child != nil; child = child.next {
-                if !check_node_for_dependency_cycle(parser, &{ child, dependent }) {
-                    return false
+        #partial switch node.type {
+            case .OBJECT, .ARRAY:
+                for child := node.first; child != nil; child = child.next {
+                    if !check_node_for_dependency_cycle(parser, &{ child, dependent }) {
+                        return false
+                    }
                 }
-            }
-        } else {
-            if .REF_VALUE in node.flags {
+            case .REF:
                 if node.text == "" {
                     fmt.printfln("Empty reference on node '%v'.", node.name) // TODO: node path
                     return false
@@ -652,7 +725,25 @@ validate_node_references :: proc(using parser: ^DOM_Parser) -> bool {
                 if !check_node_for_dependency_cycle(parser, &{ ref_node, dep_node }) {
                     return false
                 }
-            }
+                
+                if .BIND_PARENT in node.flags {
+                    // verify that refnode is an object
+                    if ref_node.type != .OBJECT do return false
+                    // clone child nodes from ref_node
+                    // if this flag is present, we can safely assume that node.parent is an object
+                    if !clone_child_nodes_recursive(node.parent, ref_node) do return false
+                    
+                    // TODO: manually remove node from parent
+                    // TODO: insert the child nodes in place, ensuring order of nodes is correct
+                    // could check for node with existing name when inserting a child node, but seems like it would not be worth doing
+                    
+                } else {
+                    // overwrite node with clone of ref node
+                    // would like to find a better solution in the future
+                    name := node.name
+                    if !clone_node_recursive(node, ref_node) do return false
+                    node.name = name
+                }
         }
         
         return true
@@ -667,6 +758,15 @@ validate_node_references :: proc(using parser: ^DOM_Parser) -> bool {
     return true
 }
 
+process_data_bindings :: proc(using parser: ^DOM_Parser) -> bool {
+    for child := dom_root.first; child != nil; child = child.next {
+        if !process_node_binding(parser, dom_root) {
+            return false
+        }
+    }
+    return true
+}
+
 process_node_binding :: proc(using parser: ^DOM_Parser, node: ^DOM_Node) -> bool {
     if .BINDING_RESOLVED in node.flags do return true
     
@@ -678,84 +778,41 @@ process_node_binding :: proc(using parser: ^DOM_Parser, node: ^DOM_Node) -> bool
         }
     }
     
-    if node.type == .OBJECT || node.type == .ARRAY {
-        for child := node.first; child != nil; child = child.next {
-            if !process_node_binding(parser, child) {
-                return false
-            }
-        }
-    }
-    else {
-        if node.data_binding.data == nil do return true
-        
-        if .REF_INDEX in node.flags {
-            if node.text == "" do return true
-            is_relative_path := node.text[0] == '.'
-            ref_node, index := find_node_by_path(is_relative_path ? node.parent : parser.dom_root, node.text)
-            if ref_node == nil do return true
-            if !dynamic_int_cast(node.data_binding, index) do return true
-        } 
-        else if .REF_VALUE in node.flags {
-            if node.text == "" do return true
-            is_relative_path := node.text[0] == '.'
-            ref_node, _ := find_node_by_path(is_relative_path ? node.parent : parser.dom_root, node.text)
-            if ref_node == nil do return true
-            
-            // if the referenced node has a data binding, jump there to resolve it and then pull the value from it directly
-            // otherwise, if it is a field, we can just get the text and assign it as normal as fallback measure
-            
-            // we have another problem here with objects, because we can only create a reference to an object that has a data binding
-                // we could copy the entire subtree of the referenced object and create bindings to it as normal
-                    // would use up much more memory
-                    // most simple thing to do
-                // we could make a temp binding and evaluate bindings in a sort of immediate mode?
-                    // if we have multiple things that reference the same base object, we will be repeating a lot of work 
-                    // we don't have a mechanism to make bindings and immediately evaluate them
-                        // would probably not play nice with the rest of the system
-                    // would need mechanism to remove the bindings after they are resolved
-                        // while resolving, if we jumped to another ref, and then that pointed back into this object, but not to the same node, it would see a binding there
-                // we could allocate space for a temp struct, bind the object to that, and then copy from that?
-                    // we fundamentally can't really impose a type on data without a direct data binding
-                        // we could assume the type of the first object to reference this one and assert that future things that ref to this object match the imposed type
-                        // but that feels kind of bad and prevents it from working with usings
-                    // but we can't exactly just memcopy for structs anyhow, so maybe it is better if we actually navigate the whole structure.
-                    // if we shallow copy from a temp allocated thing, we will have big problems
-                        // could just force a deep copy on temp objects, but maybe we want things to reference the same underlying data?
-                        // I want there to be as much flexibility as possible in how the user can have their data be allocated
-            
-            // if ref_node.data_binding.data != nil {
-            //     // later, we may want to make this more type matching more sophisticated, and work with usings on structs
-            //     // for now, user can handle that manually
-            //     if ref_node.data_binding.id != node.data_binding.id {
-            //         return false
-            //     }
-            //     if !process_node_binding(parser, ref_node) {
-            //         return false
-            //     }
-                
-            //     // Problem! this mem copy won't allow us to have an object ref multiple other objects properly
-            //     // maybe we can return a bitmap of the fields of a struct that get set when processing the binding?
-            //     // also, this definitely won't work for arrays.
-            //     // unfortunately, we may need a whole big switch case here for copying values
-            //     // seems like switch cases end up being the largest source of code in this entire library
-            //     // fortunately, these will probably be a little bit smaller in Jai due to the more simple type system
-                
-            //     // what if we want to clone string rather than shallow copy? (should probably be a dom node flag)
-            //     mem.copy(node.data_binding.data, ref_node.data_binding.data, type_info_of(node.data_binding.id).size)
-            // }
-            
-            if ref_node.type == .FIELD {
-                if !set_value_from_string(node.data_binding, ref_node.text) {
+    #partial switch node.type {
+        case .OBJECT, .ARRAY:
+            for child := node.first; child != nil; child = child.next {
+                if !process_node_binding(parser, child) {
                     return false
                 }
             }
-        }
-        else {
+        case .FIELD: 
             if !set_value_from_string(node.data_binding, node.text) {
                 return false
             }
-        }
     }
+    
+    // if we do the node copying thing, then we won't actually have any ref nodes in the dom when we reach this point, as they will all have been replaced
+    // else if node.type == .REF {
+    //     if node.data_binding.data == nil do return true
+    //     if .REF_INDEX in node.flags {
+    //         if node.text == "" do return true
+    //         is_relative_path := node.text[0] == '.'
+    //         ref_node, index := find_node_by_path(is_relative_path ? node.parent : parser.dom_root, node.text)
+    //         if ref_node == nil do return true
+    //         if !dynamic_int_cast(node.data_binding, index) do return true
+    //     }
+    //     else if .REF_VALUE in node.flags {
+    //         ref_node := node.ref.node
+    //         for ref_node.type == .REF {
+    //             ref_node = ref_node.ref.node
+    //         }
+    //         if ref_node.type == .FIELD {
+    //             if !set_value_from_string(node.data_binding, ref_node.text) {
+    //                 return false
+    //             }
+    //         }
+    //     }
+    // }
     
     return true
 }
@@ -814,63 +871,74 @@ construct_dom_from_gon_file :: proc(t: ^GON_Tokenizer) -> (^DOM_Node) {
             }
         }
         
-        // check for field refs
-        has_ref := false
-        #partial switch __peek_token(t).type {
-            case .REF_INDEX:
-                has_ref = true
-                flags |= {.REF_INDEX}
-                if !__consume_token(t) do return nil
-            case .REF_POINTER:
-                has_ref = true
-                flags |= {.REF_POINTER}
-                if !__consume_token(t) do return nil
-            case .REF_VALUE:
-                has_ref = true
-                flags |= {.REF_VALUE}
-                if !__consume_token(t) do return nil
-        }
-
-        // read field value
         next_token, ok = __get_token(t)
         if !ok {
             fmt.printfln("GON tokenization error: Unexpected %v token \"%v\".", next_token.type, next_token.text)
             return nil
         }
-        #partial switch next_token.type {
-            case .STRING: 
-                type = .FIELD
-                text = next_token.text
-            case .OBJECT_BEGIN: 
-                type = .OBJECT
-            case .ARRAY_BEGIN: 
-                type = .ARRAY
-            case .ARRAY_END:
-                if parent.type != .ARRAY {
+        
+        if next_token.type == .REF_INDEX   || 
+           next_token.type == .REF_POINTER || 
+           next_token.type == .REF_VALUE {
+            
+            node := append_child_node(parent)
+            node.name  = name
+            node.type  = .REF
+            node.flags = flags
+            
+            #partial switch __peek_token(t).type {
+                case .REF_INDEX:
+                    node.ref.type = .INDEX
+                case .REF_POINTER:
+                    node.ref.type = .POINTER
+                case .REF_VALUE:
+                    node.ref.type = .VALUE
+            }
+            
+            next_token, ok = __get_token(t)
+            if !ok {
+                fmt.printfln("GON tokenization error: Unexpected %v token \"%v\".", next_token.type, next_token.text)
+                return nil
+            }
+            if next_token.type != .STRING {
+                fmt.println("GON parsing error: Field ref path must be a valid string value.")
+                return nil
+            } 
+            node.ref.text = next_token.text
+            
+        } else {
+            // read field value
+            #partial switch next_token.type {
+                case .STRING: 
+                    type = .FIELD
+                    text = next_token.text
+                case .OBJECT_BEGIN: 
+                    type = .OBJECT
+                case .ARRAY_BEGIN: 
+                    type = .ARRAY
+                case .ARRAY_END:
+                    if parent.type != .ARRAY {
+                        fmt.printfln("GON parse error: Unexpected %v token \"%v\".", next_token.type, next_token.text)
+                        return nil
+                    }
+                    parent = parent.parent
+                    continue
+                case:
                     fmt.printfln("GON parse error: Unexpected %v token \"%v\".", next_token.type, next_token.text)
                     return nil
-                }
-                parent = parent.parent
-                continue
-            case:
-                fmt.printfln("GON parse error: Unexpected %v token \"%v\".", next_token.type, next_token.text)
-                return nil
-        }
-        
-        assert(type != .INVALID)
-        if has_ref && type != .FIELD {
-            fmt.printfln("GON parse error: Field ref token '%v' must be followed by a field path string.", next_token.type, next_token.text)
-            return nil
-        }
-        
-        node := append_child_node(parent)
-        node.name  = name
-        node.type  = type
-        node.flags = flags
-        if node.type == .OBJECT || node.type == .ARRAY {
-            parent = node
-        } else {
-            node.text = text
+            }
+            
+            assert(type != .INVALID)
+            
+            node := append_child_node(parent)
+            node.name  = name
+            node.type  = type
+            node.flags = flags
+            if node.type == .OBJECT || node.type == .ARRAY {
+                parent = node
+            } else {
+                node.text = text
+            }
         }
     }
     
