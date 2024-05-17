@@ -1,0 +1,76 @@
+
+# Field References
+#     You can refer to other fields in the file using $, &, and *, followed by a path string.
+#     $ will get the value of the referenced node.
+#     & will get the index of the referenced node within its local scope. 
+#         If the parent has a binding to an indexed array, it will return the manually specified index rather than the node index.
+#     * will get a pointer to the data binding of the referenced node.
+#         This pointer will be type-checked before being stored to the data binding.
+
+
+reference_object {
+    text       "this is a referenced string"
+    number     &"things/'thing 2'/text"
+    more_text  $"./text"
+}
+
+base {
+    name     "Base"
+    numbers  [ 11, 22, 33, 44, 55 ]
+    float    305.7
+    text     "this is a string"
+}
+
+# using field reference syntax inside of an object without a field name 
+# will bring all of the fields in the referenced object into this scope
+# so here, instance will get the numbers and float values from base
+instance { 
+    $     "base" 
+    name  "Instance"
+    text  "this is an overriding string"
+}
+
+
+# OBJECT-TYPE ARRAYS
+# 'things' has a binding to an array of structs, and that struct specifies a name member
+# so when parsing this object-type array, the names of sub-objects will be assigned to that name member
+
+things {
+    "thing 1" {
+        numbers  [ 1, 2, 3, 4, 5 ]
+        float    5.3
+        text     $"../'thing 2'/text"
+    } 
+    "thing 2" { 
+        numbers  [ 6, 7, $"reference_object/number", 9, 10 ]
+        float    3.5
+        text     $"reference_object/text"
+    }
+    "thing 3" { 
+        $     "base"
+        text  $"../'thing 4'/text"
+    }
+    "thing 4" { 
+        $     "base"
+        text  $"../'thing 1'/text"
+    }
+}
+
+# INDEXED ARRAYS
+# indexed arrays are very useful for lookup tables where you may not want to specify every single index, 
+# or would like to specify elements out of order
+
+thing_lookup {
+    5 {
+        name     "thing 1"
+        numbers  [ 1, 2, 3, 4, 5 ]
+        float    5.3
+        text     "this is a lovely string"
+    }
+    2 {
+        name     "thing 2"
+        numbers  [ 6, 7, 8, 9, 10 ]
+        float    3.5
+        text     "this is a quaint string"
+    }
+}

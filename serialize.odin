@@ -160,6 +160,9 @@ serialize_dom_nodes_to_gon :: proc(using serializer: ^Serializer, node: ^DOM_Nod
             strings.write_string(&builder, 
                 to_conformant_string(node.text, allocator = context.temp_allocator),
             )
+            
+        case .REF:
+            fmt.sbprintf(&builder, "%v", get_node_index(node.ref.node))
     }
     
     return true

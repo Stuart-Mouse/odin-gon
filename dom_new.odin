@@ -70,6 +70,12 @@ DOM_Node :: struct {
     },
 }
 
+DOM_Node_Insertion_Behaviour :: enum {
+    DEFAULT,        // just insert nodes with no extra checks
+    OVERWRITE,      // overwrite existing nodes with the same name
+    UNDERWRITE,     // don't insert node if one with the same name already exists
+}
+
 // walk_nodes_depth_first :: proc(node: ^DOM_Node, walk_proc: proc(^DOM_Node, rawptr) -> bool, data: rawptr) {
 //     if walk_proc == nil do return false
     
@@ -81,6 +87,14 @@ DOM_Node :: struct {
 //         child = child.next
 //     }
 // }
+
+get_node_index :: proc(node: ^DOM_Node) -> int {
+    index := 0
+    for n := node.prev; n != nil; n = n.prev {
+        index += 1
+    }
+    return index
+}
 
 debug_print_all_nodes :: proc(node: ^DOM_Node, indent: int = 0) {
     for i in 0..<indent do fmt.print(INDENTATION_STRING)
@@ -280,6 +294,23 @@ append_child_node :: proc(parent: ^DOM_Node, prepend := false, allocator := cont
     return node
 }
 
+// get_or_append_child_node_by_name :: proc() {
+//     node: ^DOM_Node
+//     if insert_type != .DEFAULT {
+//         node = find_child_node_by_name()
+//         if node != nil {
+//             if insert_type == .UNDERWRITE { 
+                
+//             }
+//             if insert_type == .OVERWRITE {
+                
+//             }
+//         }
+//     }
+    
+//     return append_child_node()
+// }
+
 append_node_with_path :: proc(parent: ^DOM_Node, path: string = "", prepend := false, allocator := context.allocator) -> ^DOM_Node {
     node := parent
     
@@ -337,7 +368,9 @@ clone_node_recursive :: proc(dst: ^DOM_Node, src: ^DOM_Node, allocator := contex
             return clone_child_nodes_recursive(dst, src, allocator)
         case .REF:
             dst.ref = src.ref
-            fmt.println("cloned a ref node...")
+            if dst.ref.type == .VALUE {
+                fmt.println("cloned a value ref node...")
+            }
         case .FIELD:
             dst.text = src.text
         case .INVALID:
@@ -607,7 +640,7 @@ add_data_binding_to_dom_parser :: proc(using parser: ^DOM_Parser, binding: any, 
     //     if !process_node_binding(parser, ref_node) {
     //         return false
     //     }
-        
+            
     //     // Problem! this mem copy won't allow us to have an object ref multiple other objects properly
     //     // maybe we can return a bitmap of the fields of a struct that get set when processing the binding?
     //     // also, this definitely won't work for arrays.
@@ -701,41 +734,54 @@ validate_node_references :: proc(using parser: ^DOM_Parser) -> bool {
             d = d.dependent
         }
         
-        #partial switch node.type {
+        switch node.type {
             case .OBJECT, .ARRAY:
                 for child := node.first; child != nil; child = child.next {
                     if !check_node_for_dependency_cycle(parser, &{ child, dependent }) {
                         return false
                     }
                 }
+                return true
+                
             case .REF:
-                if node.text == "" {
+                if node.ref.text == "" {
                     fmt.printfln("Empty reference on node '%v'.", node.name) // TODO: node path
                     return false
                 }
                 
-                is_relative_path := node.text[0] == '.'
-                ref_node, _ := find_node_by_path(is_relative_path ? node.parent : parser.dom_root, node.text)
+                is_relative_path := node.ref.text[0] == '.'
+                ref_node, ref_idx := find_node_by_path(is_relative_path ? node.parent : parser.dom_root, node.ref.text)
                 
                 if ref_node == nil {
                     fmt.printfln("Invalid reference on node '%v'.", node.name) // TODO: node path
                     return false
                 }
                 
+                node.ref.node = ref_node
+
+                if node.ref.type != .VALUE do return true
+                
                 if !check_node_for_dependency_cycle(parser, &{ ref_node, dep_node }) {
                     return false
                 }
                 
                 if .BIND_PARENT in node.flags {
-                    // verify that refnode is an object
                     if ref_node.type != .OBJECT do return false
-                    // clone child nodes from ref_node
-                    // if this flag is present, we can safely assume that node.parent is an object
-                    if !clone_child_nodes_recursive(node.parent, ref_node) do return false
                     
-                    // TODO: manually remove node from parent
-                    // TODO: insert the child nodes in place, ensuring order of nodes is correct
-                    // could check for node with existing name when inserting a child node, but seems like it would not be worth doing
+                    parent := node.parent
+                    for child := ref_node.first; child != nil; child = child.next {
+                        dst, _ := find_child_node_by_name(parent, child.name)
+                        if dst != nil do continue
+                        dst = append_child_node(parent)
+                        if !clone_node_recursive(dst, child) do return false
+                    }
+
+                    parent.count -= 1
+                    if node.next != nil do node.next.prev = node.prev
+                    if node.prev != nil do node.prev.next = node.next
+                    if parent.first == node do parent.first = node.next
+                    if parent.last  == node do parent.last  = node.prev
+                    free(node)
                     
                 } else {
                     // overwrite node with clone of ref node
@@ -744,9 +790,17 @@ validate_node_references :: proc(using parser: ^DOM_Parser) -> bool {
                     if !clone_node_recursive(node, ref_node) do return false
                     node.name = name
                 }
+                return true
+                
+            case .FIELD: 
+                return true
+                
+            case .INVALID:
+                fmt.println("Invalid node type in validate_node_references().")
+                return false
         }
         
-        return true
+        return false
     }
     
     for child := parser.dom_root.first; child != nil; child = child.next {
@@ -785,34 +839,32 @@ process_node_binding :: proc(using parser: ^DOM_Parser, node: ^DOM_Node) -> bool
                     return false
                 }
             }
+            return true
+            
         case .FIELD: 
-            if !set_value_from_string(node.data_binding, node.text) {
-                return false
+            return node.data_binding == nil || set_value_from_string(node.data_binding, node.text)
+            
+        case .REF:
+            #partial switch node.ref.type {
+                case .INDEX:
+                    // TODO: see if we can shift this logic to when we resolve node references, since we already get the ref node and its index there
+                    // the index could change though, if we have an object value ref in the same scope and it modifies the dom...
+                    // the index needs to be stored on the node, somehow...
+                        // for printing the node out
+                        // when another node references this node, gets value as string
+                        // we could create a temp string and store the index on the node...
+                    // TODO: need proper formatting for ref nodes
+                    
+                    return node.data_binding == nil || dynamic_int_cast(node.data_binding, get_node_index(node.ref.node))
+                    
+                case .POINTER:
+                    
+                case:
+                    fmt.printfln("got a ref of type %v in process_node_binding", node.ref.type)
+                    return false
             }
+            
     }
-    
-    // if we do the node copying thing, then we won't actually have any ref nodes in the dom when we reach this point, as they will all have been replaced
-    // else if node.type == .REF {
-    //     if node.data_binding.data == nil do return true
-    //     if .REF_INDEX in node.flags {
-    //         if node.text == "" do return true
-    //         is_relative_path := node.text[0] == '.'
-    //         ref_node, index := find_node_by_path(is_relative_path ? node.parent : parser.dom_root, node.text)
-    //         if ref_node == nil do return true
-    //         if !dynamic_int_cast(node.data_binding, index) do return true
-    //     }
-    //     else if .REF_VALUE in node.flags {
-    //         ref_node := node.ref.node
-    //         for ref_node.type == .REF {
-    //             ref_node = ref_node.ref.node
-    //         }
-    //         if ref_node.type == .FIELD {
-    //             if !set_value_from_string(node.data_binding, ref_node.text) {
-    //                 return false
-    //             }
-    //         }
-    //     }
-    // }
     
     return true
 }
@@ -886,13 +938,10 @@ construct_dom_from_gon_file :: proc(t: ^GON_Tokenizer) -> (^DOM_Node) {
             node.type  = .REF
             node.flags = flags
             
-            #partial switch __peek_token(t).type {
-                case .REF_INDEX:
-                    node.ref.type = .INDEX
-                case .REF_POINTER:
-                    node.ref.type = .POINTER
-                case .REF_VALUE:
-                    node.ref.type = .VALUE
+            #partial switch next_token.type {
+                case .REF_INDEX   : node.ref.type = .INDEX
+                case .REF_POINTER : node.ref.type = .POINTER
+                case .REF_VALUE   : node.ref.type = .VALUE
             }
             
             next_token, ok = __get_token(t)
@@ -948,7 +997,7 @@ construct_dom_from_gon_file :: proc(t: ^GON_Tokenizer) -> (^DOM_Node) {
 
 add_data_binding_to_node :: proc(node: ^DOM_Node, binding: any) -> bool  {
     if node == nil || binding.data == nil do return false
-
+    
     // binding, _ = deref_any_pointer(binding)
     binding_ti := runtime.type_info_base(type_info_of(binding.id))
     
@@ -1216,7 +1265,7 @@ add_data_binding_to_node :: proc(node: ^DOM_Node, binding: any) -> bool  {
                         index += 1
                     }
             }
-            
+
         case:
             // invalid node type error?
     }
@@ -1224,9 +1273,29 @@ add_data_binding_to_node :: proc(node: ^DOM_Node, binding: any) -> bool  {
     return true
 }
 
+// yeah, we really need to get rid of this proc and just factor into the above... 
+// having it separate just leads to it being slower and having more lines overall
 is_binding_valid :: proc(node: ^DOM_Node, binding: any) -> bool {
     binding_ti := runtime.type_info_base(type_info_of(binding.id))
     #partial switch node.type {
+        case .REF:
+            switch node.ref.type {
+                case .VALUE: 
+                    fmt.println("Trying to bind to a value ref node!")
+                    return false
+                case .INDEX:
+                    #partial switch tiv in binding_ti.variant {
+                        case runtime.Type_Info_Integer,
+                             runtime.Type_Info_Float,
+                             runtime.Type_Info_Enum:
+                             return true
+                    }
+                    return false
+                case .POINTER:
+                    tip, ok := binding_ti.variant.(runtime.Type_Info_Pointer)
+                    if !ok || runtime.type_info_base(tip.elem) != binding_ti do return false
+                    return true
+            }
         case .FIELD:
             #partial switch tiv in binding_ti.variant {
                 case runtime.Type_Info_Integer,
@@ -1347,22 +1416,22 @@ lex_next_token :: proc(file: ^string) -> (Token, bool) {
             return {.OBJECT_BEGIN, ""}, true
         case '}':
             advance(file)
-            return {.OBJECT_END, ""}, true
+            return {.OBJECT_END,   ""}, true
         case '[':
             advance(file)
-            return {.ARRAY_BEGIN, ""}, true
+            return {.ARRAY_BEGIN,  ""}, true
         case ']':
             advance(file)
-            return {.ARRAY_END, ""}, true
+            return {.ARRAY_END,    ""}, true
         case '&':
             advance(file)
-            return {.REF_INDEX, ""}, true
+            return {.REF_INDEX,    ""}, true
         case '*':
             advance(file)
-            return {.REF_POINTER, ""}, true
+            return {.REF_POINTER,  ""}, true
         case '$':
             advance(file)
-            return {.REF_VALUE, ""}, true
+            return {.REF_VALUE,    ""}, true
     }
     
     is_numeric :: proc(char: u8) -> bool {
@@ -1389,7 +1458,7 @@ lex_next_token :: proc(file: ^string) -> (Token, bool) {
         return {type, ""}, true
     }
     
-    // quoted strings
+    // string
     if file^[0] == '"' || file^[0] == '\'' || file^[0] == '`' { 
         quote_char := file^[0]
         
@@ -1442,41 +1511,10 @@ lex_next_token :: proc(file: ^string) -> (Token, bool) {
         
         return {.STRING, string_value[:string_len]}, true
     }
-  
-    // // scan for end of string in quotation marks
-    // // TODO: replace this with parse_quoted_string() or whatever
-    // if file^[0] == '\"' {
-    //     if !advance(file) do return {.EOF, ""}, false
-    //     string_value = string_value[1:]
-    //     string_len := 0
-        
-    //     for file^[0] != '\"' {
-    //         adv : int = 1
-    //         if file^[0] == '\\' do adv = 2
-    //         if !advance(file, adv) do return {.EOF, ""}, false
-    //         string_len += adv
-    //     }
-    //     advance(file) // step over closing quotation mark
     
-    //     return {.STRING, string_value[:string_len]}, true
-    // }
+    invalid_token_str := file^
+    if !skip_whitespace_and_comments(file) do return {.EOF, ""}, true
     
-    // // scan for end of bare string
-    // // TODO: also extract out logic for parsing ident/number
-    // if !is_reserved_char(file^[0]) {
-    //     string_len := 0
-    //     for !is_reserved_char(file^[0]) && !is_whitespace(file^[0]) {
-    //         if !advance(file) {
-    //             return {.EOF, ""}, false
-    //         }
-    //         string_len += 1
-    //     }
-    //     return {.STRING, string_value[:string_len]}, true
-    // }
-  
-    // there's probably some funky character in the file...?
-    // now that we have more strict rules around what can be in an ident/number/etc., we are going to need more complex error handling
-    // TODO: handle new error cases here
     fmt.printfln("Invalid token '%v' encountered.\n", file^)
     return {.INVALID, ""}, false
 }
