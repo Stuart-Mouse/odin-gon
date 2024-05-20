@@ -27,7 +27,6 @@ DOM_Node_Flag  :: enum {
     ARRAY_ENUMERATED,
     
     // used to indicate that a field assumes the parent object's binding, used for special field value ref syntax
-    // also used for bit sets? idk go back and read that and clarify
     BIND_PARENT,
 
     // formatting flags
@@ -58,8 +57,7 @@ DOM_Node :: struct {
             type : DOM_Node_Ref_Type,
         },
         
-        // text: string, 
-        value: Token, // will replace with token later, should do the same for name
+        value: Token,
         
         using children: struct { 
             first : ^DOM_Node,
@@ -274,6 +272,15 @@ get_next_token_from_path_string :: proc(t: ^GON_Tokenizer) -> (Token, bool) {
     return next, true
 }
 
+format_node_path :: proc(builder: ^strings.Builder, node: ^DOM_Node) {
+    if node.parent != nil {
+        format_node_path(builder, node.parent)
+        strings.write_byte(builder, '/')
+    }
+    fmt.sbprintf(builder, "%v", node.name)
+    return
+}
+
 
 /*
     It seems like we really may not *need* to create nodes for all indirect bindings when serializing.
@@ -314,6 +321,10 @@ init_dom_parser :: proc(using parser: ^DOM_Parser, _file: string, _allocator := 
     node_allocator = _allocator
     tokenizer.file = _file
     consume_token(&tokenizer) // get the first token when we init, we always pull one token ahead of the one we return
+    
+    // ensure that parse context is properly init'd
+    if log == nil do log = default_log_proc
+    if log == nil do log = log_stub
 }
 
 /*
@@ -340,7 +351,8 @@ add_data_binding_to_dom_parser :: proc(using parser: ^DOM_Parser, binding: any, 
                 - just add enum typeid in io_data for array ezpz
             - field refs
                 + traverse nodes by relative field path
-                + get index (parent must be array)
+                + get index
+                    - support alternative method for indexed arrays
                 + get binding value / or fallback to string value
                 - get binding pointer
             - callbacks / fully custom formatting
@@ -358,6 +370,13 @@ add_data_binding_to_dom_parser :: proc(using parser: ^DOM_Parser, binding: any, 
         validate field refs
         insert data bindings onto nodes
         process data bindings
+        
+        
+    TODO:
+    improve resolution of field value references
+    currently, you can't reference a field that is inherited by an object value reference if that ref is later in the file
+    so, when we jump to a referenced field, we actually need to first check the parent object for object references and bring those nodes into scope before resolving the field ref.
+    this will complicate things a good bit, since it will mean we can now walk up the dom in certain situations...
     
 */
 
@@ -654,7 +673,7 @@ add_data_binding_to_node :: proc(node: ^DOM_Node, binding: any) -> bool  {
     #partial switch node.type {
         case .OBJECT:
             for child := node.first; child != nil; child = child.next {
-                if .BIND_PARENT in child.flags { // necessarily a field and value ref
+                if .BIND_PARENT in child.flags { // necessarily a value ref
                     child.data_binding = node.data_binding
                 }
             }
@@ -671,29 +690,21 @@ add_data_binding_to_node :: proc(node: ^DOM_Node, binding: any) -> bool  {
                         add_data_binding_to_node(child, member_any)
                     }
                     
-                    // TODO: maybe we want error handling when name member is missing
-                    if .ARRAY_AS_OBJECT in node.parent.flags {
-                        type_io_data, found := IO_Data_Lookup[node.data_binding.id]
-                        if found {
-                            member := reflect.struct_field_by_name(node.data_binding.id, type_io_data.name_member) 
-                            if member != {} {
-                                member_any := any {
-                                    data = mem.ptr_offset(cast(^u8)node.data_binding.data, member.offset),
-                                    id   = member.type.id,
-                                }
-                                if !set_value_from_string(member_any, node.name) {
-                                    return false
-                                }
+                    // TODO: maybe we want error handling when name member is missing, especially if parent type is array-object 
+                    type_io_data, found := IO_Data_Lookup[node.data_binding.id]
+                    if found {
+                        if type_io_data.name_member != {} {
+                            member_any := any {
+                                data = mem.ptr_offset(cast(^u8)node.data_binding.data, type_io_data.name_member.offset),
+                                id   = type_io_data.name_member.type.id,
+                            }
+                            if !set_value_from_string(member_any, node.name) {
+                                return false
                             }
                         }
                     }
                     
                 case runtime.Type_Info_Map:
-                    // currently, only map[string] T types are supported, will support other key types later
-                    if tiv.key.id != typeid_of(string) {
-                        return false
-                    }
-                    
                     // I suppose map key bindings are a special exception to the rule that we don't assign any values at this point in parsing
                     // this should be fine because we can't use a field ref for the name or anything funky like that, so this will not possibly have any data dependencies
                     key_member: reflect.Struct_Field
@@ -702,55 +713,47 @@ add_data_binding_to_node :: proc(node: ^DOM_Node, binding: any) -> bool  {
                     if is_struct {
                         type_io_data, found := IO_Data_Lookup[tiv.value.id]
                         if found {
-                            key_member = reflect.struct_field_by_name(value_ti.id, type_io_data.map_key_member) 
-                        }
-                    }
-                    
-                    // in order to support other key types, we need to have some kind of dynamic_new() proc
-                    // we can use the temp allocator to allocatate space for one item that we reuse for all chidren, like we do for the empty value
-                    // may as well make the acutal proc and have it return an any, so that we can pass this to set_value_from_string()
-                    // also, we will still only be able to use simple data types like ints, floats, enums since those are the only things we can represent in a gon name
-                    // this is sort of a low priority feature tbh
-                    // also, maybe we just use a fixed 16 bytes on stack for the key value, since we won't have any types larger than an i128 or string
-                    
-                    empty_value := cast(rawptr) raw_data(make([]u8, tiv.value.size, context.temp_allocator))
-                    for child := node.first; child != nil; child = child.next {
-                        raw_map := cast(^runtime.Raw_Map) node.data_binding.data
-                        
-                        // We copy the name here with the understanding that if map_key_member is not set in io data, 
-                        // then the user needs to free the keys manually, as though the map itself owns the keys
-                        name_copy := strings.clone(child.name)
-                        key := cast(rawptr) &name_copy
-                        
-                        runtime.__dynamic_map_check_grow(raw_map, tiv.map_info)
-                        
-                        // allocate empty space that can be safely memcopied from
-                        // this has to be done because apparently there's no way to insert a hash dynamically without passing a value
-                        value := runtime.__dynamic_map_set_without_hash(
-                            raw_map, tiv.map_info, key, empty_value,
-                        )
-                        add_data_binding_to_node(child, any { rawptr(value), tiv.value.id })
-                        
-                        if key_member != {} {
-                            key_binding := any {
-                                data = mem.ptr_offset(cast(^u8)child.data_binding.data, key_member.offset),
-                                id   = key_member.type.id,
-                            }
-                            if !set_value_from_string(key_binding, name_copy, no_copy = true) {
+                            key_member = type_io_data.map_key_member
+                            if runtime.type_info_base(key_member.type) != runtime.type_info_base(tiv.key) {
+                                fmt.println("Error: key member type does not match map key type.")
                                 return false
                             }
                         }
                     }
                     
-                /*
-                    May be better to switch on internal type first and then switch on GON field type, 
-                    since for arrays, most of the code is shared in common and we only have a bit of extra handling for objects.
-                */
+                    // allocate temp space for key value
+                    // if key value type is a string, then set_value_from_string will also perform its own allocation in order to copy the source string
+                    // it is up to the user to free this string later. 
+                    // if key_member is set, the key value will be memcopied there. for a string, it will not clone the underlying data
+                    key_any := dynamic_new(tiv.key.id, context.temp_allocator)
+                    if !set_value_from_string(key_any, node.name) {
+                        return false
+                    }
+                    
+                    // allocate empty space that can be safely memcopied from
+                    // this has to be done because apparently there's no way to insert a hash dynamically without passing a value
+                    empty_value := cast(rawptr) raw_data(make([]u8, tiv.value.size, context.temp_allocator))
+                    
+                    for child := node.first; child != nil; child = child.next {
+                        raw_map := cast(^runtime.Raw_Map) node.data_binding.data
+                        runtime.__dynamic_map_check_grow(raw_map, tiv.map_info)
+                        
+                        value := runtime.__dynamic_map_set_without_hash(
+                            raw_map, tiv.map_info, key_any.data, empty_value,
+                        )
+                        add_data_binding_to_node(child, any { rawptr(value), tiv.value.id })
+                        
+                        if key_member != {} {
+                            key_member_ptr := mem.ptr_offset(cast(^u8) child.data_binding.data, key_member.offset)
+                            mem.copy(key_member_ptr, key_any.data, tiv.key.size)
+                        }
+                    }
+                    
                 case runtime.Type_Info_Dynamic_Array:
                     raw_array := cast(^runtime.Raw_Dynamic_Array) node.data_binding.data
                 
                     io_data, found := &IO_Data_Lookup[binding_ti.id]
-                    if found && .PARSE_ARRAY_INDEXED in io_data.parse.flags {
+                    if found && .ARRAY_INDEXED in io_data.parse.flags {
                         node.flags |= { .ARRAY_INDEXED }
                         // highest_index := 0
                         // for child := node.first; child != nil; child = child.next {
@@ -784,62 +787,69 @@ add_data_binding_to_node :: proc(node: ^DOM_Node, binding: any) -> bool  {
                         index += 1
                     }
                     
-                case runtime.Type_Info_Array:
+                case runtime.Type_Info_Array, runtime.Type_Info_Slice:
                     io_data, found := &IO_Data_Lookup[binding_ti.id]
-                    if found && .PARSE_ARRAY_INDEXED in io_data.parse.flags {
-                        node.flags |= { .ARRAY_INDEXED }
-                    } else {
-                        elem_ti := runtime.type_info_base(tiv.elem)
-                        _, is_struct := elem_ti.variant.(runtime.Type_Info_Struct) 
-                        if is_struct {
-                            node.flags |= { .ARRAY_AS_OBJECT }
-                        }
+
+                    data       : rawptr
+                    elem_count : int
+                    elem_ti    : ^runtime.Type_Info
+                    
+                    // disambiguate array/slice
+                    #partial switch tiv in tiv {
+                        case runtime.Type_Info_Array:
+                            data       = node.data_binding.data
+                            elem_count = tiv.count
+                            elem_ti    = tiv.elem
+                
+                        case runtime.Type_Info_Slice:
+                            raw_slice := cast(^runtime.Raw_Slice) node.data_binding.data
+                            data       = raw_slice.data
+                            elem_count = raw_slice.len
+                            elem_ti    = tiv.elem
                     }
-                    index := 0
-                    for child := node.first; child != nil; child = child.next {
-                        elem_index := index
-                        if .ARRAY_INDEXED in node.flags {
-                            elem_index = strconv.atoi(child.name)
-                            if elem_index >= tiv.count {
+                    
+                    if found && .ARRAY_INDEXED in io_data.parse.flags {
+                        node.flags |= { .ARRAY_INDEXED }
+                        for child := node.first; child != nil; child = child.next {
+                            elem_index := strconv.atoi(child.name)
+                            if elem_index >= elem_count {
+                                fmt.println("Error: array index is out of bounds.")
                                 return false
                             }
+                            elem_any := any {
+                                data = mem.ptr_offset(cast(^u8)data, elem_ti.size * elem_index),
+                                id   = elem_ti.id,
+                            }
+                            add_data_binding_to_node(child, elem_any)
                         }
-                        elem_any := any {
-                            data = mem.ptr_offset(cast(^u8)node.data_binding.data, tiv.elem.size * elem_index),
-                            id   = tiv.elem.id,
-                        }
-                        add_data_binding_to_node(child, elem_any)
-                        index += 1
-                    }
-        
-                case runtime.Type_Info_Slice:
-                    io_data, found := &IO_Data_Lookup[binding_ti.id]
-                    if found && .PARSE_ARRAY_INDEXED in io_data.parse.flags {
-                        node.flags |= { .ARRAY_INDEXED }
                     } else {
-                        elem_ti := runtime.type_info_base(tiv.elem)
-                        _, is_struct := elem_ti.variant.(runtime.Type_Info_Struct) 
+                        if node.count > elem_count {
+                            fmt.println("Error: too many elements in array.")
+                            return false
+                        }
+                        
+                        elem_ti_base := runtime.type_info_base(elem_ti)
+                        _, is_struct := elem_ti_base.variant.(runtime.Type_Info_Struct) 
+                        
                         if is_struct {
                             node.flags |= { .ARRAY_AS_OBJECT }
+                            // TODO: also check the io data to see if name member is defined
+                        } else {
+                            fmt.println("Data binding error: object-type array must contain a struct with a defined name member.")
+                            return false
                         }
-                    }
-                    raw_slice := cast(^runtime.Raw_Slice) node.data_binding.data
-                    index := 0
-                    for child := node.first; child != nil; child = child.next {
-                        elem_index := index
-                        if .ARRAY_INDEXED in node.flags {
-                            elem_index = strconv.atoi(child.name)
-                            if elem_index >= raw_slice.len {
-                                return false
+                        
+                        index := 0
+                        for child := node.first; child != nil; child = child.next {
+                            elem_any := any {
+                                data = mem.ptr_offset(cast(^u8)data, elem_ti.size * index),
+                                id   = elem_ti.id,
                             }
+                            add_data_binding_to_node(child, elem_any)
+                            index += 1
                         }
-                        elem_any := any {
-                            data = mem.ptr_offset(cast(^u8)raw_slice.data,  tiv.elem.size * elem_index),
-                            id   = tiv.elem.id,
-                        }
-                        add_data_binding_to_node(child, elem_any)
-                        index += 1
                     }
+                    
                     /* 
                         TODO: 
                         GON objects can only validly be bound to arrays when the element type is a struct,
@@ -865,7 +875,7 @@ add_data_binding_to_node :: proc(node: ^DOM_Node, binding: any) -> bool  {
                 
                 case runtime.Type_Info_Struct:
                     if node.count > len(tiv.names) {
-                        fmt.println("Invalid data binding, array-type struct contains too many elements.")
+                        fmt.println("Data binding error: array-type struct contains too many elements.")
                         return false
                     }
                     index := 0
@@ -880,11 +890,13 @@ add_data_binding_to_node :: proc(node: ^DOM_Node, binding: any) -> bool  {
                     
                 case runtime.Type_Info_Dynamic_Array:
                     if !reserve_any_dynamic_array(node.data_binding, node.count) { 
-                        fmt.println("Invalid data binding, failed to reserve space in dynamic array.")
+                        fmt.println("Data binding error: failed to reserve space in dynamic array.")
                         return false
                     }
+                    
                     raw_array := cast(^runtime.Raw_Dynamic_Array) node.data_binding.data
                     raw_array.len = node.count
+                    
                     index := 0
                     for child := node.first; child != nil; child = child.next {
                         elem_any := any {
@@ -895,40 +907,44 @@ add_data_binding_to_node :: proc(node: ^DOM_Node, binding: any) -> bool  {
                         index += 1
                     }
         
-                case runtime.Type_Info_Array:
-                    if node.count > tiv.count {
-                        fmt.println("Invalid data binding, bounds check failed on array.")
+                case runtime.Type_Info_Array, runtime.Type_Info_Slice:
+                    io_data, found := &IO_Data_Lookup[binding_ti.id]
+
+                    data       : rawptr
+                    elem_count : int
+                    elem_ti    : ^runtime.Type_Info
+                    
+                    // disambiguate array/slice
+                    #partial switch tiv in tiv {
+                        case runtime.Type_Info_Array:
+                            data       = node.data_binding.data
+                            elem_count = tiv.count
+                            elem_ti    = tiv.elem
+                
+                        case runtime.Type_Info_Slice:
+                            raw_slice := cast(^runtime.Raw_Slice) node.data_binding.data
+                            data       = raw_slice.data
+                            elem_count = raw_slice.len
+                            elem_ti    = tiv.elem
+                    }
+                    
+                    if node.count > elem_count {
+                        fmt.println("Data binding error: bounds check failed on array or slice.")
                         return false
                     }
-                    elem_ti := runtime.type_info_base(tiv.elem)
+                    
                     index := 0
                     for child := node.first; child != nil; child = child.next {
                         elem_any := any {
-                            data = mem.ptr_offset(cast(^u8)node.data_binding.data, tiv.elem.size * index),
-                            id   = tiv.elem.id,
-                        }
-                        add_data_binding_to_node(child, elem_any)
-                        index += 1
-                    }
-        
-                case runtime.Type_Info_Slice:
-                    raw_slice := cast(^runtime.Raw_Slice) node.data_binding.data
-                    if node.count > raw_slice.len {
-                        fmt.println("Invalid data binding, bounds check failed on slice.")
-                        return false
-                    }
-                    index := 0
-                    for child := node.first; child != nil; child = child.next {
-                        elem_any := any {
-                            data = mem.ptr_offset(cast(^u8)raw_slice.data,  tiv.elem.size * index),
-                            id   = tiv.elem.id,
+                            data = mem.ptr_offset(cast(^u8)data,  elem_ti.size * index),
+                            id   = elem_ti.id,
                         }
                         add_data_binding_to_node(child, elem_any)
                         index += 1
                     }
                     
                 case:
-                    fmt.println("Invalid data binding, mismatched gon/internal type.")
+                    fmt.println("Data binding error: mismatched gon/internal type.")
                     return false
             }
 

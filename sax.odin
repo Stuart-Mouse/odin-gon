@@ -501,18 +501,13 @@ process_data_binding :: proc(using ctxt: ^Parser, field: ^SAX_Field) -> bool {
                     // UNLESS the user changed the io data in the data bind callback.
                     // This is probably something that we want to allow though, since if the user messes things up on their own, that's on them and I don't care so much.
                     
-                    if field.io_data.name_member != "" {
+                    if field.io_data.name_member != {} {
                         // Maybe we should have some kind of error here if parent is internally an array or map type?
                         // Doesn't really matter for an array, though it would be weird to have named objects in an array only for those names to be discarded.
                         // Especially for map, since we presumably need someone to take ownership of the string used for the key?
-                        member := reflect.struct_field_by_name(field.data_binding.id, field.io_data.name_member)
-                        if member == {} {
-                            log("Unable to parse named struct, the type '%v' specifies an invalid name member '%v' in its IO data.", field.data_binding.id, field.io_data.name_member)
-                            return false
-                        }
                         member_any := any {
-                            data = mem.ptr_offset(cast(^u8)field.data_binding.data, member.offset),
-                            id   = member.type.id,
+                            data = mem.ptr_offset(cast(^u8)field.data_binding.data, field.io_data.name_member.offset),
+                            id   = field.io_data.name_member.type.id,
                         }
                         if !set_value_from_string(member_any, field.name) {
                             return false
@@ -582,7 +577,7 @@ check_for_indirect_data_binding :: proc(using ctxt: ^Parser, field, parent: ^SAX
             field.data_binding = parent.data_binding
 
         case runtime.Type_Info_Dynamic_Array:
-            if .PARSE_ARRAY_INDEXED in parent.io_data.parse.flags {
+            if .ARRAY_INDEXED in parent.io_data.parse.flags {
                 assert(parent.type == .OBJECT) // TODO
                 field.index = strconv.atoi(field.name)
                 field.data_binding = array_add_any_at_index(parent.data_binding, field.index)
@@ -596,7 +591,7 @@ check_for_indirect_data_binding :: proc(using ctxt: ^Parser, field, parent: ^SAX
             }
 
         case runtime.Type_Info_Array:
-            if .PARSE_ARRAY_INDEXED in parent.io_data.parse.flags {
+            if .ARRAY_INDEXED in parent.io_data.parse.flags {
                 assert(parent.type == .OBJECT) // TODO
                 field.index = strconv.atoi(field.name)
             }
@@ -615,7 +610,7 @@ check_for_indirect_data_binding :: proc(using ctxt: ^Parser, field, parent: ^SAX
         case runtime.Type_Info_Slice:
             raw_slice := cast(^runtime.Raw_Slice) parent.data_binding.data
             
-            if .PARSE_ARRAY_INDEXED in parent.io_data.parse.flags {
+            if .ARRAY_INDEXED in parent.io_data.parse.flags {
                 assert(parent.type == .OBJECT) // TODO
                 field.index = strconv.atoi(field.name)
             }

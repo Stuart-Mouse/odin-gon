@@ -351,8 +351,8 @@ serialize_any :: proc(
                 return 
             }
             
-            as_indexed  := .SERIALIZE_ARRAY_INDEXED in flags 
-            as_object   := .AS_OBJECT               in flags 
+            as_indexed  := .ARRAY_INDEXED in flags 
+            as_object   := .AS_OBJECT     in flags 
             
             // by default, print structs and arrays on individual lines, all else print on one line
             // perhaps we should also consider the number of elements?

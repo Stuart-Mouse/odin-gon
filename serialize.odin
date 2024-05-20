@@ -258,7 +258,7 @@ determine_node_type_for_serialization :: proc(node: ^DOM_Node) -> Field_Type {
             }
             if io_data_found {
                 if .AS_OBJECT               in io_data.serialize.flags ||
-                   .SERIALIZE_ARRAY_INDEXED in io_data.serialize.flags {
+                   .ARRAY_INDEXED in io_data.serialize.flags {
                     return .OBJECT
                 }
             }
@@ -270,7 +270,7 @@ determine_node_type_for_serialization :: proc(node: ^DOM_Node) -> Field_Type {
             }
             if io_data_found {
                 if .AS_OBJECT               in io_data.serialize.flags ||
-                   .SERIALIZE_ARRAY_INDEXED in io_data.serialize.flags {
+                   .ARRAY_INDEXED in io_data.serialize.flags {
                     return .OBJECT
                 }
             }
@@ -282,7 +282,7 @@ determine_node_type_for_serialization :: proc(node: ^DOM_Node) -> Field_Type {
             }
             if io_data_found {
                 if .AS_OBJECT               in io_data.serialize.flags ||
-                   .SERIALIZE_ARRAY_INDEXED in io_data.serialize.flags {
+                   .ARRAY_INDEXED in io_data.serialize.flags {
                     return .OBJECT
                 }
             }

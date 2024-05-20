@@ -396,3 +396,12 @@ all_bytes_are_zero_data :: proc(data: rawptr, len: int) -> bool {
     }
     return true
 }
+
+dynamic_new :: proc(type: typeid, allocator := context.allocator) -> any {
+    ti  := type_info_of(type)
+    buf := make([]u8, ti.size, allocator)
+    return any {
+        data = raw_data(buf),
+        id   = type,
+    }
+}
