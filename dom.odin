@@ -677,7 +677,7 @@ add_data_binding_to_node :: proc(node: ^DOM_Node, binding: any) -> bool  {
                     child.data_binding = node.data_binding
                 }
             }
-    
+            
             #partial switch tiv in binding_ti.variant {
                 case runtime.Type_Info_Struct:
                     for child := node.first; child != nil; child = child.next {
@@ -726,17 +726,17 @@ add_data_binding_to_node :: proc(node: ^DOM_Node, binding: any) -> bool  {
                     // it is up to the user to free this string later. 
                     // if key_member is set, the key value will be memcopied there. for a string, it will not clone the underlying data
                     key_any := dynamic_new(tiv.key.id, context.temp_allocator)
-                    if !set_value_from_string(key_any, node.name) {
-                        return false
-                    }
                     
                     // allocate empty space that can be safely memcopied from
                     // this has to be done because apparently there's no way to insert a hash dynamically without passing a value
                     empty_value := cast(rawptr) raw_data(make([]u8, tiv.value.size, context.temp_allocator))
                     
+                    raw_map := cast(^runtime.Raw_Map) node.data_binding.data
                     for child := node.first; child != nil; child = child.next {
-                        raw_map := cast(^runtime.Raw_Map) node.data_binding.data
                         runtime.__dynamic_map_check_grow(raw_map, tiv.map_info)
+                        if !set_value_from_string(key_any, child.name) {
+                            return false
+                        }
                         
                         value := runtime.__dynamic_map_set_without_hash(
                             raw_map, tiv.map_info, key_any.data, empty_value,
