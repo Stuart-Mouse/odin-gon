@@ -150,15 +150,15 @@ serialize_dom_nodes_to_gon :: proc(using serializer: ^Serializer, node: ^DOM_Nod
             strings.write_string(&builder, is_array ? "]" : "}")
             
         case .FIELD:
-            if node.text == "" {
+            if node.value.text == "" {
                 if node.data_binding.data == nil {
                     fmt.printf("ERROR: no value defined for node '%v'\n", node.name) // TODO: proc to get full path to node
                     return false
                 }
-                node.text = fmt.tprintf("%v", node.data_binding)
+                node.value.text = fmt.tprintf("%v", node.data_binding)
             }
             strings.write_string(&builder, 
-                to_conformant_string(node.text, allocator = context.temp_allocator),
+                to_conformant_string(node.value.text, allocator = context.temp_allocator),
             )
             
         case .REF:
@@ -211,17 +211,192 @@ serialize_dom_nodes_to_json :: proc(using serializer: ^Serializer, node: ^DOM_No
             strings.write_string(&builder, is_array ? "]" : "}")
             
         case .FIELD:
-            if node.text == "" {
+            if node.value.text == "" {
                 if node.data_binding.data == nil {
                     fmt.printf("ERROR: no value defined for node '%v'\n", node.name) // TODO: proc to get full path to node
                     return false
                 }
-                node.text = fmt.tprintf("%v", node.data_binding)
+                node.value.text = fmt.tprintf("%v", node.data_binding)
             }
             strings.write_string(&builder, 
-                to_conformant_string(node.text, allocator = context.temp_allocator),
+                to_conformant_string(node.value.text, allocator = context.temp_allocator),
             )
     }
     
     return true
 }
+
+
+// determination is currently made based only on node's data binding and parent's data binding, but we will probably consider some other flags on the node later
+// the type set here is authoritative, so when we go to actually serialize a node later, it must be serializable as this type
+determine_node_type_for_serialization :: proc(node: ^DOM_Node) -> Field_Type {
+    if node.data_binding.data == nil do return .OBJECT
+
+    io_data, io_data_found := IO_Data_Lookup[node.data_binding.id]
+    ti := runtime.type_info_base(type_info_of(node.data_binding.id))
+    
+    #partial switch tiv in ti.variant {
+        case runtime.Type_Info_Integer,
+             runtime.Type_Info_Float,
+             runtime.Type_Info_Enum,
+             runtime.Type_Info_String,
+             runtime.Type_Info_Boolean:
+            return .FIELD
+        
+        case runtime.Type_Info_Bit_Set: 
+            // check if parent data binding is the same.
+            if node.parent.data_binding.data == node.data_binding.data {
+                return .FIELD
+            }
+            return .ARRAY
+        
+        // arrays of bytes/u8 are serialized as string
+        // we will probably distinguish this later on u8 vs byte, where byte is serialized using some binary data blob
+        case runtime.Type_Info_Array:
+            if tiv.elem.size == 1 {
+                return .FIELD
+            }
+            if io_data_found {
+                if .AS_OBJECT               in io_data.serialize.flags ||
+                   .SERIALIZE_ARRAY_INDEXED in io_data.serialize.flags {
+                    return .OBJECT
+                }
+            }
+            return .ARRAY
+            
+        case runtime.Type_Info_Dynamic_Array:
+            if tiv.elem.size == 1 {
+                return .FIELD
+            }
+            if io_data_found {
+                if .AS_OBJECT               in io_data.serialize.flags ||
+                   .SERIALIZE_ARRAY_INDEXED in io_data.serialize.flags {
+                    return .OBJECT
+                }
+            }
+            return .ARRAY
+            
+        case runtime.Type_Info_Slice:
+            if tiv.elem.size == 1 {
+                return .FIELD
+            }
+            if io_data_found {
+                if .AS_OBJECT               in io_data.serialize.flags ||
+                   .SERIALIZE_ARRAY_INDEXED in io_data.serialize.flags {
+                    return .OBJECT
+                }
+            }
+            return .ARRAY
+            
+        case runtime.Type_Info_Struct:
+            if io_data_found {
+                if .AS_ARRAY in io_data.serialize.flags {
+                    return .ARRAY
+                }
+            }
+            return .OBJECT
+        
+        case runtime.Type_Info_Map:
+            return .OBJECT
+            
+        case:
+            return .INVALID
+    }
+    
+    return .INVALID
+}
+
+append_nodes_for_indirect_bindings :: proc(node: ^DOM_Node, allocator := context.allocator) {
+    if node == nil || node.data_binding.data == nil do return
+    using runtime
+
+    ti := type_info_base(type_info_of(node.data_binding.id))
+    #partial switch tiv in ti.variant {
+        case Type_Info_Struct: 
+            member_count := len(tiv.names)
+            for i in 0..<member_count {
+                member_type   := tiv.types  [i]
+                member_name   := tiv.names  [i]
+                member_offset := tiv.offsets[i]
+                
+                member_any := any {
+                    data = mem.ptr_offset(cast(^byte)node.data_binding.data, member_offset),
+                    id   = member_type.id,
+                }
+                
+                // figure out whether to prepend elems (will do for things that need to be attrs)
+                append_data_node(node, member_name, member_any, allocator = allocator)
+            }
+            
+            return
+            
+        case Type_Info_Array, Type_Info_Slice, Type_Info_Dynamic_Array: 
+            data       : rawptr
+            elem_count : int
+            elem_ti    : ^Type_Info
+            
+            // disambiguate array/slice/dynamic
+            #partial switch tiv in tiv {
+                case Type_Info_Array:
+                    data       = node.data_binding.data
+                    elem_count = tiv.count
+                    elem_ti    = tiv.elem
+        
+                case Type_Info_Slice:
+                    raw_slice := cast(^runtime.Raw_Slice) node.data_binding.data
+                    data       = raw_slice.data
+                    elem_count = raw_slice.len
+                    elem_ti    = tiv.elem
+      
+                case Type_Info_Dynamic_Array:
+                    raw_dynamic_array := cast(^runtime.Raw_Dynamic_Array) node.data_binding.data
+                    data       = raw_dynamic_array.data
+                    elem_count = raw_dynamic_array.len
+                    elem_ti    = tiv.elem
+                    if elem_count == 0 do return // skip serializing empty dynamic arrays
+            }
+            
+            for i in 0..<elem_count {
+                elem_any := any {
+                    id   = elem_ti.id,
+                    data = mem.ptr_offset(cast(^byte)data, elem_ti.size * i),
+                }
+                
+                // TODO: as indexed, as object
+                
+                elem_name: string = fmt.tprint(i)
+                append_data_node(node, elem_name, elem_any, allocator = allocator)
+            }
+            
+            return
+            
+        case Type_Info_Map:
+            raw_map := transmute(^Raw_Map) node.data_binding.data
+            #partial switch ti_key in runtime.type_info_base(tiv.key).variant {
+                case Type_Info_String:
+                    m := (^mem.Raw_Map)(node.data_binding.data)
+                    
+                    if m != nil {
+                        if tiv.map_info == nil {
+                            return
+                        }
+                        map_cap := uintptr(runtime.map_cap(m^))
+                        ks, vs, hs, _, _ := runtime.map_kvh_data_dynamic(m^, tiv.map_info)
+                        j := 0
+                        for bucket_index in 0..<map_cap {
+                            runtime.map_hash_is_valid(hs[bucket_index]) or_continue         
+                            key   := runtime.map_cell_index_dynamic(ks, tiv.map_info.ks, bucket_index)
+                            value := runtime.map_cell_index_dynamic(vs, tiv.map_info.vs, bucket_index)
+                  
+                            append_data_node(node, (cast(^string)key)^, any { rawptr(value), tiv.value.id })
+                        }
+                    }
+                    
+                case: 
+                    fmt.printf("Unable to serialize type: %v\nCurrently, only maps with string keys are supported.", ti)
+            }
+                    
+            return
+    }
+}
+
