@@ -93,13 +93,13 @@ debug_print_all_nodes :: proc(node: ^DOM_Node, indent: int = 0) {
 }
 
 // does not delete the passed node or its neighbors, only children
-delete_child_nodes_recursive :: proc(node: ^DOM_Node) {
+delete_child_nodes_recursive :: proc(node: ^DOM_Node, allocator := context.allocator) {
     if node.type == .OBJECT || node.type == .ARRAY {
         child := node.first
         for child != nil {
             next := child.next
-            delete_child_nodes_recursive(child)
-            free(child)
+            delete_child_nodes_recursive(child, allocator)
+            free(child, allocator)
             child = next
         }
     }
@@ -327,6 +327,18 @@ init_dom_parser :: proc(using parser: ^DOM_Parser, _file: string, _allocator := 
     if log == nil do log = log_stub
 }
 
+// creates a dom parser with the given parameters, intializes it, and constructs the dom from the given file
+// after calling this, you can just add your data bindings and then process them
+parse_file_to_dom :: proc(_file: string, _allocator := context.allocator) -> (DOM_Parser, bool) {
+    parser: DOM_Parser
+    init_dom_parser(&parser, _file, _allocator)
+    
+    if !construct_dom_from_gon_file(&parser) do return {}, false
+    if !validate_node_references   (&parser) do return {}, false
+    
+    return parser, true
+}
+
 /*
     We are no longer appending to a dynamic array of data bindings, instead just inserting those data bindings immediately when this is called by the user.
     Which is nice because that means we save a little bit of memory on that and we don't need the Data_Binding struct anymore.
@@ -344,8 +356,8 @@ add_data_binding_to_dom_parser :: proc(using parser: ^DOM_Parser, binding: any, 
             + indexed arrays
             + arrays of named objects
             + map types
-                - support key types other than string
-                + store key value to map key member (need to not duplicate string here, so that user can free)
+                + support key types other than string
+                + store key value to map key member
             - enumerated arrays
             - indexing normal arrays with enums?
                 - just add enum typeid in io_data for array ezpz
@@ -370,13 +382,21 @@ add_data_binding_to_dom_parser :: proc(using parser: ^DOM_Parser, binding: any, 
         validate field refs
         insert data bindings onto nodes
         process data bindings
-        
-        
+    
+    
     TODO:
     improve resolution of field value references
     currently, you can't reference a field that is inherited by an object value reference if that ref is later in the file
     so, when we jump to a referenced field, we actually need to first check the parent object for object references and bring those nodes into scope before resolving the field ref.
     this will complicate things a good bit, since it will mean we can now walk up the dom in certain situations...
+    we would actually have to expand all object refs from root on down when searching for a field ref if we want to be able to reference thigns in this way
+    perhaps the solution is just to say that you can't reference something unless it exists there texutally?
+    but that would actually require specifically restricting the subset of things that naturally will work out...
+    
+    TODO: 
+    use a tracking allocator and ensure that we aren't leaking memory. This is pretty important.
+    Also, probably refactor all code that allocates nodes and ensure that they are allocated and freed using the proper allocator
+    
     
 */
 
@@ -393,10 +413,10 @@ validate_node_references :: proc(using parser: ^DOM_Parser) -> bool {
         d := dependent
         for d != nil {
             if node == d.node {
-                fmt.println("Circular dependency found on nodes:")
+                log("Circular dependency found on nodes:")
                 _d := dependent
                 for _d != nil {
-                    fmt.printfln("\t%v", _d.node.name)
+                    log("\t%v", _d.node.name)
                     _d = _d.dependent
                 }
                 return false
@@ -415,7 +435,10 @@ validate_node_references :: proc(using parser: ^DOM_Parser) -> bool {
                 
             case .REF:
                 if node.ref.text == "" {
-                    fmt.printfln("Empty reference on node '%v'.", node.name) // TODO: node path
+                    sb := strings.builder_make()
+                    defer strings.builder_destroy(&sb)
+                    format_node_path(&sb, node)
+                    log("Empty reference on node '%v'.", strings.to_string(sb))
                     return false
                 }
                 
@@ -423,7 +446,10 @@ validate_node_references :: proc(using parser: ^DOM_Parser) -> bool {
                 ref_node, ref_idx := find_node_by_path(is_relative_path ? node.parent : parser.dom_root, node.ref.text)
                 
                 if ref_node == nil {
-                    fmt.printfln("Invalid reference on node '%v'.", node.name) // TODO: node path
+                    sb := strings.builder_make()
+                    defer strings.builder_destroy(&sb)
+                    format_node_path(&sb, node)
+                    log("Invalid reference on node '%v'.", strings.to_string(sb))
                     return false
                 }
                 
@@ -451,7 +477,7 @@ validate_node_references :: proc(using parser: ^DOM_Parser) -> bool {
                     if node.prev != nil do node.prev.next = node.next
                     if parent.first == node do parent.first = node.next
                     if parent.last  == node do parent.last  = node.prev
-                    free(node)
+                    free(node, node_allocator)
                     
                 } else {
                     // overwrite node with clone of ref node
@@ -466,7 +492,7 @@ validate_node_references :: proc(using parser: ^DOM_Parser) -> bool {
                 return true
                 
             case .INVALID:
-                fmt.println("Invalid node type in validate_node_references().")
+                log("Invalid node type in validate_node_references().")
                 return false
         }
         
@@ -531,64 +557,64 @@ process_node_binding :: proc(using parser: ^DOM_Parser, node: ^DOM_Node) -> bool
     return true
 }
 
-construct_dom_from_gon_file :: proc(t: ^GON_Tokenizer) -> (^DOM_Node) {
+construct_dom_from_gon_file :: proc(using parser: ^DOM_Parser) -> bool {
     next_token: Token
     ok        : bool
     
-    root := new(DOM_Node)
-    root.name = "root"
-    root.type = .OBJECT
+    dom_root      = new(DOM_Node, node_allocator)
+    dom_root.name = "root"
+    dom_root.type = .OBJECT
     
     success := false
     defer if !success {
-        delete_child_nodes_recursive(root)
-        free(root)
+        delete_child_nodes_recursive(dom_root)
+        free(dom_root, node_allocator)
     }
     
-    parent := root
+    parent := dom_root
     L_Loop: for parent != nil {
         name, text : string
         type  : Field_Type
         flags : DOM_Node_Flags
         
         // field value ref without name inside an object will create an unnamed field with the same data binding as the parent object
-        if parent.type == .OBJECT && peek_token(t).type == .REF_VALUE {
+        if parent.type == .OBJECT && peek_token(&tokenizer).type == .REF_VALUE {
             flags |= {.BIND_PARENT}
         } else {
             // read field name
             if parent.type != .ARRAY {
-                next_token, ok = get_token(t)
+                next_token, ok = get_token(&tokenizer)
                 if !ok {
-                    fmt.printfln("GON tokenization error: Unexpected %v token \"%v\".", next_token.type, next_token.text)
-                    return nil
+                    log("GON tokenization error: Unexpected %v token \"%v\".", next_token.type, next_token.text)
+                    return true
                 }
                 #partial switch next_token.type {
                     case .STRING: 
                         name = next_token.text
                     case .EOF:
-                        if parent != root {
-                            fmt.printfln("GON parse error: Unexpected %v token \"%v\".", next_token.type, next_token.text)
-                            return nil
+                        if parent != dom_root {
+                            log("GON parse error: Unexpected %v token \"%v\".", next_token.type, next_token.text)
+                            return true
                         }
                         break L_Loop
                     case .OBJECT_END:
                         if parent.type != .OBJECT {
-                            fmt.printfln("GON parse error: Unexpected %v token \"%v\".", next_token.type, next_token.text)
-                            return nil
+                            log("GON parse error: Unexpected %v token \"%v\".", next_token.type, next_token.text)
+                            return true
                         }
                         parent = parent.parent
                         continue
                     case:
-                        fmt.printfln("GON parse error: Unexpected %v token \"%v\".", next_token.type, next_token.text)
-                        return nil
+                        log("GON parse error: Unexpected %v token \"%v\".", next_token.type, next_token.text)
+                        return true
                 }
             }
         }
         
-        next_token, ok = get_token(t)
+        next_token, ok = get_token(&tokenizer)
         if !ok {
-            fmt.printfln("GON tokenization error: Unexpected %v token \"%v\".", next_token.type, next_token.text)
-            return nil
+            log("GON tokenization error: Unexpected %v token \"%v\".", next_token.type, next_token.text)
+            return true
         }
         
         if next_token.type == .REF_INDEX   || 
@@ -606,14 +632,14 @@ construct_dom_from_gon_file :: proc(t: ^GON_Tokenizer) -> (^DOM_Node) {
                 case .REF_VALUE   : node.ref.type = .VALUE
             }
             
-            next_token, ok = get_token(t)
+            next_token, ok = get_token(&tokenizer)
             if !ok {
-                fmt.printfln("GON tokenization error: Unexpected %v token \"%v\".", next_token.type, next_token.text)
-                return nil
+                log("GON tokenization error: Unexpected %v token \"%v\".", next_token.type, next_token.text)
+                return false
             }
             if next_token.type != .STRING {
-                fmt.println("GON parsing error: Field ref path must be a valid string value.")
-                return nil
+                log("GON parsing error: Field ref path must be a valid string value.")
+                return false
             } 
             node.ref.text = next_token.text
         }
@@ -629,14 +655,14 @@ construct_dom_from_gon_file :: proc(t: ^GON_Tokenizer) -> (^DOM_Node) {
                     type = .ARRAY
                 case .ARRAY_END:
                     if parent.type != .ARRAY {
-                        fmt.printfln("GON parse error: Unexpected %v token \"%v\".", next_token.type, next_token.text)
-                        return nil
+                        log("GON parse error: Unexpected %v token \"%v\".", next_token.type, next_token.text)
+                        return false
                     }
                     parent = parent.parent
                     continue
                 case:
                     fmt.printfln("GON parse error: Unexpected %v token \"%v\".", next_token.type, next_token.text)
-                    return nil
+                    return false
             }
             
             assert(type != .INVALID)
@@ -654,7 +680,7 @@ construct_dom_from_gon_file :: proc(t: ^GON_Tokenizer) -> (^DOM_Node) {
     }
     
     success = true
-    return root
+    return true
 }
 
 add_data_binding_to_node :: proc(node: ^DOM_Node, binding: any) -> bool  {

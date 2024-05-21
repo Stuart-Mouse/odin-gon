@@ -17,7 +17,9 @@ Log_Proc :: #type proc(format: string, args: ..any, loc := #caller_location)
 default_log_proc : Log_Proc
 
 // if no log proc is provided in the parse context or set as the default_log_proc...
-log_stub :: proc(format: string, args: ..any, loc := #caller_location) { }
+log_stub  :: proc(format: string, args: ..any, loc := #caller_location) { }
+
+log_print :: proc(format: string, args: ..any, loc := #caller_location) { fmt.printfln(format, ..args) }
 
 /*
     TODO: add internal log levels
