@@ -36,7 +36,7 @@ whitespace_chars :: " ,\t\r\n\x00"
 reserved_chars   :: "~!@#$%^&*{}[]\""
 whitespace_and_reserved_chars :: " ,\t\r\n#{}[]\"\x00"
 
-Token_Type :: enum {
+Token_Type :: enum u8 {
     INVALID,
     STRING,
     OBJECT_BEGIN,
@@ -52,7 +52,7 @@ Token_Type :: enum {
     EOF,
 }
 
-Field_Type :: enum { 
+Field_Type :: enum u8 { 
     INVALID = 0, 
     FIELD   = 1,
     OBJECT  = 2, 

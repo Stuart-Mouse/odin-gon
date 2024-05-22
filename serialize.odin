@@ -162,7 +162,12 @@ serialize_dom_nodes_to_gon :: proc(using serializer: ^Serializer, node: ^DOM_Nod
             )
             
         case .REF:
-            fmt.sbprintf(&builder, "%v", get_node_index(node.ref.node))
+            switch node.ref.type {
+                case .INDEX   : fmt.sbprintf(&builder, "%v", get_node_index(node.ref.node))
+                case .POINTER : fmt.sbprintf(&builder, "*\"%v\"", node.ref.text)
+                case .VALUE   : assert(false, "Cannot print a value node.") // should not occur
+            }
+            
     }
     
     return true
