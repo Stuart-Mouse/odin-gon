@@ -19,6 +19,7 @@ INDENTATION_STRING := "    "
 DOM_Node_Flags :: bit_set[DOM_Node_Flag]
 DOM_Node_Flag  :: enum {
     // parsing flags
+    REFERENCES_RESOLVED,
     BINDING_RESOLVED,
     BINDING_ON_PATH,
     
@@ -218,6 +219,16 @@ append_node_with_path :: proc(parent: ^DOM_Node, path: string = "", prepend := f
     return node
 }
 
+remove_node :: proc(node: ^DOM_Node, allocator := context.allocator) {
+    node.parent.count -= 1
+    if node.next != nil do node.next.prev = node.prev
+    if node.prev != nil do node.prev.next = node.next
+    if node.parent.first == node do node.parent.first = node.next
+    if node.parent.last  == node do node.parent.last  = node.prev
+    free(node, allocator)
+}
+
+
 clone_child_nodes_recursive :: proc(dst: ^DOM_Node, src: ^DOM_Node, allocator := context.allocator) -> bool {
     for child := src.first; child != nil; child = child.next {
         node := append_child_node(dst, false, allocator)
@@ -393,6 +404,13 @@ add_data_binding_to_dom_parser :: proc(using parser: ^DOM_Parser, binding: any, 
     perhaps the solution is just to say that you can't reference something unless it exists there texutally?
     but that would actually require specifically restricting the subset of things that naturally will work out...
     
+    just solve the references iteratively
+    if we can't solve a field ref, then just skip it and come back later in the next pass
+    each time we walk the dom, check whether we've made any progress, if not, then quit and give an error for the unsolved references
+    this could definitely become slow given adverse inputs, but its simpler and I'm more confident that it will just work
+    it will actually be quite inefficient even on basic inputs, since we will evaluate each field path for a reference on every single iteration
+    
+    
     TODO: 
     use a tracking allocator and ensure that we aren't leaking memory. This is pretty important.
     Also, probably refactor all code that allocates nodes and ensure that they are allocated and freed using the proper allocator
@@ -401,6 +419,108 @@ add_data_binding_to_dom_parser :: proc(using parser: ^DOM_Parser, binding: any, 
 */
 
 validate_node_references :: proc(using parser: ^DOM_Parser) -> bool {
+    Result :: bit_set[enum{ERROR, COMPLETE, PROGRESS, REMOVE_NODE}]
+
+    recurse :: proc(using parser: ^DOM_Parser, node: ^DOM_Node) -> Result {
+        if .REFERENCES_RESOLVED in node.flags do return { .COMPLETE }
+        
+        switch node.type {
+            case .OBJECT, .ARRAY:
+                    result: Result = { .COMPLETE }
+                    child := node.first; 
+                    for child != nil {
+                        next_child   := child.next
+                        child_result := recurse(parser, child)
+                        if .ERROR       in child_result do return { .ERROR }
+                        if .REMOVE_NODE in child_result do remove_node(child, node_allocator)
+                        result |=  child_result & { .PROGRESS }
+                        result &= (child_result & { .COMPLETE }) | ~{.COMPLETE}
+                        child = next_child
+                    }
+                    return result
+                
+            case .REF:
+                if node.ref.text == "" {
+                    sb := strings.builder_make()
+                    defer strings.builder_destroy(&sb)
+                    format_node_path(&sb, node)
+                    log("Empty reference on node '%v'.", strings.to_string(sb))
+                    return { .ERROR }
+                }
+                
+                is_relative_path := node.ref.text[0] == '.'
+                ref_node, _      := find_node_by_path(is_relative_path ? node.parent : parser.dom_root, node.ref.text)
+                
+                if ref_node == nil {
+                    // sb := strings.builder_make()
+                    // defer strings.builder_destroy(&sb)
+                    // format_node_path(&sb, node)
+                    // log("Invalid reference on node '%v'.", strings.to_string(sb))
+                    
+                    // TODO: find a way to print failed node path when full pass makes no progress
+                    return { }
+                }
+                node.ref.node = ref_node
+                
+                if node.ref.type != .VALUE { 
+                    return { .PROGRESS, .COMPLETE }
+                }
+                
+                result := Result { .PROGRESS, .COMPLETE }
+                
+                if .BIND_PARENT in node.flags {
+                    assert(ref_node.type == .OBJECT, "ref node with bind parent flag was not pointing to an object.")
+                    parent := node.parent
+                    for child := ref_node.first; child != nil; child = child.next {
+                        dst, _ := find_child_node_by_name(parent, child.name)
+                        if dst != nil do continue
+                        dst = append_child_node(parent)
+                        if !clone_node_recursive(dst, child) do return { .ERROR }
+                    }
+                    result |= {.REMOVE_NODE}
+                }
+                else {
+                    name := node.name
+                    if !clone_node_recursive(node, ref_node) do return { .ERROR }
+                    node.name = name
+                }
+                
+                node.flags |= {.REFERENCES_RESOLVED}
+                return result
+                
+            case .FIELD:
+                node.flags |= {.REFERENCES_RESOLVED}
+                return { .PROGRESS, .COMPLETE }
+                
+            case .INVALID:
+                log("Invalid node type in validate_node_references().")
+                return { .ERROR }
+        }
+        
+        return { .ERROR }
+    }
+    
+    for {
+        result: Result = { .COMPLETE }
+        child := parser.dom_root.first; 
+        for child != nil {
+            next_child   := child.next
+            child_result := recurse(parser, child)
+            if .ERROR       in child_result do return false
+            if .REMOVE_NODE in child_result do remove_node(child, node_allocator)
+            result |=  child_result & { .PROGRESS }
+            result &= (child_result & { .COMPLETE }) | ~{.COMPLETE}
+            child = next_child
+        }
+        if .COMPLETE     in result do break
+        if .PROGRESS not_in result do return false
+    }
+    
+    return true
+}
+
+
+validate_node_references_old :: proc(using parser: ^DOM_Parser) -> bool {
     // wraps dom node so that we do not need to store dependent on the node itself, we can store on the stack instead.
     // then callee can traverse up the chain of dependent nodes to check for cycles
     Dependency_Node :: struct {
@@ -443,7 +563,7 @@ validate_node_references :: proc(using parser: ^DOM_Parser) -> bool {
                 }
                 
                 is_relative_path := node.ref.text[0] == '.'
-                ref_node, ref_idx := find_node_by_path(is_relative_path ? node.parent : parser.dom_root, node.ref.text)
+                ref_node, _      := find_node_by_path(is_relative_path ? node.parent : parser.dom_root, node.ref.text)
                 
                 if ref_node == nil {
                     sb := strings.builder_make()
