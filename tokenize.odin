@@ -78,12 +78,10 @@ lex_next_token :: proc(file: ^string) -> (Token, bool) {
     
     // not very correct, but whatever for now
     if file^[0] == '.' {
-        type := Token_Type.PATH_HERE
         if advance(file) && file^[0] == '.' {
-            type = .PATH_PARENT
             advance(file)
+            return {.PATH_PARENT, ""}, true
         }
-        return {type, ""}, true
     }
     
     // string
@@ -104,35 +102,12 @@ lex_next_token :: proc(file: ^string) -> (Token, bool) {
         return {.STRING, string_value[:string_len]}, true
     }
     
-    // number
-    if is_numeric(file^[0]) || file^[0] == '-' { 
-        string_value := file^[0:]
-        string_len := 0
-        
-        // number base specifiers
-        if file^[0] == '0' {
-            if file^[0] == 'b' || 
-               file^[0] == 'h' || 
-               file^[0] == 'o' || 
-               file^[0] == 'x' {
-                if !advance(file) do return {.EOF, ""}, false
-            }
-        }
-        
-        for is_numeric(file^[0]) || file^[0] == '_' || file^[0] == '.' {
-            string_len += 1
-            if !advance(file) do break
-        }
-        
-        return {.STRING, string_value[:string_len]}, true
-    }
-    
-    // identifier
-    if is_alpha(file^[0]) || file^[0] == '_' {
+    // unquoted string
+    if is_alpha(file^[0]) || is_numeric(file^[0]) || file^[0] == '-' || file^[0] == '_' || file^[0] == '.' {
         string_value := file^[0:]
         string_len   := 0
         
-        for is_alpha(file^[0]) || is_numeric(file^[0]) || file^[0] == '_' {
+        for is_alpha(file^[0]) || is_numeric(file^[0]) || file^[0] == '-' || file^[0] == '_' || file^[0] == '.' {
             string_len += 1
             if !advance(file) do break
         }

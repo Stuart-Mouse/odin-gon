@@ -105,18 +105,30 @@ serializer_insert_data_binding :: proc(serializer: ^Serializer, path: string, bi
 serialize_dom_nodes_to_gon :: proc(using serializer: ^Serializer, node: ^DOM_Node) -> bool {
     if serializer == nil || node == nil do return false
     
-    in_array := node.parent != nil && node.parent.type == .ARRAY
+    in_array       := false
+    is_first_child := false
+    same_line      := false
+
+    if node.parent != nil {
+        in_array       = node.parent.type == .ARRAY
+        is_first_child = node == node.parent.first
+        same_line      = (.SAME_LINE in node.parent.flags)
+    }
     
-    is_first_child := node.parent != nil && node == node.parent.first
-    
-    if in_array {
+    if same_line || in_array {
         if !is_first_child {
             strings.write_string(&builder, ",")
         }
+    }
+    
+    if same_line {
         strings.write_string(&builder, " ")
     } else {
         strings.write_string(&builder, "\n")
-        for i in 0..<indent do strings.write_string(&builder, INDENTATION_STRING);
+        for i in 0..<indent do strings.write_string(&builder, INDENTATION_STRING)
+    }
+    
+    if !in_array {
         strings.write_string(&builder, 
             to_conformant_string(node.name, allocator = context.temp_allocator),
         )
@@ -125,7 +137,16 @@ serialize_dom_nodes_to_gon :: proc(using serializer: ^Serializer, node: ^DOM_Nod
     
     #partial switch node.type {
         case .OBJECT, .ARRAY: 
-            is_array := node.type == .ARRAY
+            is_array := (node.type == .ARRAY)
+            if is_array {
+                // TODO: this works fine when nodes have a data binding, but not when printing nodes parsed directly from file
+                // If we want this to have proper formatting in that case, then we need to mark nodes as sameline when we parse them in
+                elem_tid := node.first.data_binding.id
+                if do_sameline_for_type(elem_tid) {
+                    node.flags |= { .SAME_LINE }
+                    same_line = true
+                }
+            }
             
             strings.write_string(&builder, is_array ? "[" : "{")
             
@@ -140,7 +161,7 @@ serialize_dom_nodes_to_gon :: proc(using serializer: ^Serializer, node: ^DOM_Nod
             }
             indent -= 1
             
-            if is_array {
+            if same_line {
                 strings.write_string(&builder, " ")
             } else {
                 strings.write_string(&builder, "\n")
@@ -253,6 +274,7 @@ determine_node_type_for_serialization :: proc(node: ^DOM_Node) -> Field_Type {
             if node.parent.data_binding.data == node.data_binding.data {
                 return .FIELD
             }
+            node.flags |= { .SAME_LINE }
             return .ARRAY
         
         // arrays of bytes/u8 are serialized as string
@@ -262,7 +284,7 @@ determine_node_type_for_serialization :: proc(node: ^DOM_Node) -> Field_Type {
                 return .FIELD
             }
             if io_data_found {
-                if .AS_OBJECT               in io_data.serialize.flags ||
+                if .AS_OBJECT     in io_data.serialize.flags ||
                    .ARRAY_INDEXED in io_data.serialize.flags {
                     return .OBJECT
                 }
@@ -274,7 +296,7 @@ determine_node_type_for_serialization :: proc(node: ^DOM_Node) -> Field_Type {
                 return .FIELD
             }
             if io_data_found {
-                if .AS_OBJECT               in io_data.serialize.flags ||
+                if .AS_OBJECT     in io_data.serialize.flags ||
                    .ARRAY_INDEXED in io_data.serialize.flags {
                     return .OBJECT
                 }
@@ -286,7 +308,7 @@ determine_node_type_for_serialization :: proc(node: ^DOM_Node) -> Field_Type {
                 return .FIELD
             }
             if io_data_found {
-                if .AS_OBJECT               in io_data.serialize.flags ||
+                if .AS_OBJECT     in io_data.serialize.flags ||
                    .ARRAY_INDEXED in io_data.serialize.flags {
                     return .OBJECT
                 }
@@ -405,3 +427,13 @@ append_nodes_for_indirect_bindings :: proc(node: ^DOM_Node, allocator := context
     }
 }
 
+do_sameline_for_type :: proc(type: typeid) -> bool {
+    ti := reflect.type_info_base(type_info_of(type))
+    
+    _, type_is_int   := ti.variant.(runtime.Type_Info_Integer)
+    _, type_is_float := ti.variant.(runtime.Type_Info_Float)
+    _, type_is_enum  := ti.variant.(runtime.Type_Info_Enum)
+    _, type_is_rune  := ti.variant.(runtime.Type_Info_Rune)
+    
+    return type_is_int || type_is_float || type_is_enum || type_is_rune
+}

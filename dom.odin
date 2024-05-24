@@ -68,13 +68,17 @@ DOM_Node :: struct {
     },
 }
 
-// DOM_Node_Insertion_Behaviour :: enum {
-//     DEFAULT,        // just insert nodes with no extra checks
-//     OVERWRITE,      // overwrite existing nodes with the same name
-//     UNDERWRITE,     // don't insert node if one with the same name already exists
-// }
+Node_Insertion_Behaviour :: enum {
+    DEFAULT,        // just insert nodes with no extra checks
+    OVERWRITE,      // overwrite existing nodes with the same name
+    UNDERWRITE,     // don't insert node if one with the same name already exists
+}
 
 get_node_index :: proc(node: ^DOM_Node) -> int {
+    // if node.parent == nil do return 0
+    // if .ARRAY_INDEXED in node.parent.flags {
+    //     return strconv.atoi(node.name)
+    // }
     index := 0
     for n := node.prev; n != nil; n = n.prev {
         index += 1
@@ -117,7 +121,6 @@ find_node_by_path :: proc(node: ^DOM_Node, path: string) -> (^DOM_Node, int) {
         next, ok := get_next_token_from_path_string(&t)
         if !ok                       do return nil, 0
         if next.type == .EOF         do break
-        if next.type == .PATH_HERE   do continue
         if next.type == .PATH_PARENT { node = node.parent; continue }
         node, index = find_child_node_by_name(node, next.text)
     }
@@ -138,7 +141,7 @@ find_child_node_by_name :: proc(parent: ^DOM_Node, name: string) -> (^DOM_Node, 
 }
 
 append_data_node :: proc(parent: ^DOM_Node, path: string, data_binding: any, prepend := false, allocator := context.allocator) ->  ^DOM_Node {    
-    node := append_node_with_path(parent, path, prepend, allocator)
+    node := append_node_with_path(parent, path, prepend = prepend, allocator = allocator)
     if node == nil do return node
     
     node.data_binding = data_binding
@@ -186,7 +189,26 @@ append_child_node :: proc(parent: ^DOM_Node, prepend := false, allocator := cont
     return node
 }
 
-append_node_with_path :: proc(parent: ^DOM_Node, path: string = "", prepend := false, allocator := context.allocator) -> ^DOM_Node {
+// may be a little bit odd, but if you want tell if a node was overwritten or not, check if type == .INVALID. if so, then the node was either created or overwritten
+get_or_add_child_node :: proc(parent: ^DOM_Node, name: string, behavior: Node_Insertion_Behaviour = .DEFAULT, prepend := false, allocator := context.allocator) ->  ^DOM_Node {
+    node: ^DOM_Node
+    
+    if behavior != .DEFAULT {
+        node, _ = find_child_node_by_name(parent, name)
+    }
+    
+    if node == nil {
+        node = append_child_node(parent, prepend, allocator)
+    } 
+    else if behavior == .UNDERWRITE {
+        return node
+    }
+    
+    node^ = { name = name }
+    return node
+}
+
+append_node_with_path :: proc(parent: ^DOM_Node, path: string, behavior: Node_Insertion_Behaviour = .DEFAULT, prepend := false, allocator := context.allocator) -> ^DOM_Node {
     node := parent
     
     t: GON_Tokenizer = { file = path }
@@ -197,9 +219,7 @@ append_node_with_path :: proc(parent: ^DOM_Node, path: string = "", prepend := f
         if !ok do return nil
         
         if peek_token(&t).type == .EOF {
-            node = append_child_node(node, prepend, allocator)
-            node.name = next.text
-            break
+            return get_or_add_child_node(node, next.text, behavior, prepend, allocator)
         }
         
         child, _ := find_child_node_by_name(node, next.text)
@@ -211,12 +231,13 @@ append_node_with_path :: proc(parent: ^DOM_Node, path: string = "", prepend := f
             continue
         }
         
-        node = append_child_node(node, prepend, allocator)
+        node      = append_child_node(node, prepend, allocator)
         node.name = next.text
         node.type = .OBJECT
     }
     
-    return node
+    assert(false, "unreachable")
+    return nil
 }
 
 remove_node :: proc(node: ^DOM_Node, allocator := context.allocator) {
@@ -270,13 +291,13 @@ get_next_token_from_path_string :: proc(t: ^GON_Tokenizer) -> (Token, bool) {
     if !ok do return {}, false
     
     #partial switch next.type {
-        case .EOF, .PATH_PARENT, .PATH_HERE, .STRING: // no op
+        case .EOF, .PATH_PARENT, .STRING: // no op
         case: return {}, false
     }
     
     #partial switch peek_token(t).type {
         case .EOF        : // no op
-        case .PATH_SPLIT :  consume_token(t)
+        case .PATH_SPLIT : consume_token(t)
         case             : return {}, false
     }
     
@@ -387,10 +408,9 @@ add_data_bindings_to_dom :: proc(using parser: ^DOM_Parser, bindings: [] struct 
             - enumerated arrays
             - indexing normal arrays with enums?
                 - just add enum typeid in io_data for array ezpz
-            - field refs
+            + field refs
                 + traverse nodes by relative field path
                 + get index
-                    - support alternative method for indexed arrays
                 + get binding value / or fallback to string value
                 + get binding pointer
             - callbacks / fully custom formatting
@@ -409,30 +429,12 @@ add_data_bindings_to_dom :: proc(using parser: ^DOM_Parser, bindings: [] struct 
         insert data bindings onto nodes
         process data bindings
     
-    
-    TODO:
-    improve resolution of field value references
-    currently, you can't reference a field that is inherited by an object value reference if that ref is later in the file
-    so, when we jump to a referenced field, we actually need to first check the parent object for object references and bring those nodes into scope before resolving the field ref.
-    this will complicate things a good bit, since it will mean we can now walk up the dom in certain situations...
-    we would actually have to expand all object refs from root on down when searching for a field ref if we want to be able to reference thigns in this way
-    perhaps the solution is just to say that you can't reference something unless it exists there texutally?
-    but that would actually require specifically restricting the subset of things that naturally will work out...
-    
-    just solve the references iteratively
-    if we can't solve a field ref, then just skip it and come back later in the next pass
-    each time we walk the dom, check whether we've made any progress, if not, then quit and give an error for the unsolved references
-    this could definitely become slow given adverse inputs, but its simpler and I'm more confident that it will just work
-    it will actually be quite inefficient even on basic inputs, since we will evaluate each field path for a reference on every single iteration
-    
+
     
     TODO: 
     use a tracking allocator and ensure that we aren't leaking memory. This is pretty important.
     Also, probably refactor all code that allocates nodes and ensure that they are allocated and freed using the proper allocator
     
-    
-    TODO: better procs for inserting nodes
-        flags skip collisions or overwrite nodes
     
     
     Future Optimizations:
@@ -450,12 +452,16 @@ add_data_bindings_to_dom :: proc(using parser: ^DOM_Parser, bindings: [] struct 
 */
 
 validate_node_references :: proc(using parser: ^DOM_Parser) -> bool {
-    Result :: bit_set[enum{ERROR, COMPLETE, PROGRESS, REMOVE_NODE}]
+    Result :: bit_set[ enum{ ERROR, COMPLETE, PROGRESS, REMOVE_NODE } ]
 
     recurse :: proc(using parser: ^DOM_Parser, node: ^DOM_Node) -> Result {
         if .REFERENCES_RESOLVED in node.flags do return { .COMPLETE }
         
         switch node.type {
+            case .FIELD:
+                node.flags |= { .REFERENCES_RESOLVED }
+                return { .PROGRESS, .COMPLETE }
+        
             case .OBJECT, .ARRAY:
                     result: Result = { .COMPLETE }
                     child := node.first; 
@@ -465,33 +471,46 @@ validate_node_references :: proc(using parser: ^DOM_Parser) -> bool {
                         if .ERROR       in child_result do return { .ERROR }
                         if .REMOVE_NODE in child_result do remove_node(child, node_allocator)
                         result |=  child_result & { .PROGRESS }
-                        result &= (child_result & { .COMPLETE }) | ~{.COMPLETE}
+                        result &= (child_result & { .COMPLETE }) | ~{ .COMPLETE }
                         child = next_child
+                    }
+                    if .COMPLETE in result {
+                        node.flags |= { .REFERENCES_RESOLVED }
                     }
                     return result
                 
             case .REF:
-                if node.ref.text == "" {
+                path := node.ref.text
+                if path == "" {
                     log("Empty reference on node '%v'.", format_node_path(node))
                     return { .ERROR }
                 }
                 
-                is_relative_path := node.ref.text[0] == '.'
-                ref_node, _      := find_node_by_path(is_relative_path ? node.parent : parser.dom_root, node.ref.text)
+                search_from_node := node.parent
+                if path[0] == '/' {
+                    path = path[1:]
+                    search_from_node = parser.dom_root
+                }
+                ref_node, _ := find_node_by_path(search_from_node, path)
                 
                 if ref_node == nil {
-                    // TODO: find a way to print failed node path when full pass makes no progress
+                    // TODO: find a way to print failed node path only when full pass makes no progress
+                    // maybe we collect warnings in some array and only print on error
+                    // would want to enumerate error types and store node, then format and print later
+                    log("WARNING: Cannot resolve ref from %v to %v", format_node_path(node), node.ref.text)
                     return { }
                 }
                 node.ref.node = ref_node
                 
                 // pointer and index refs can be passed along and handled later
                 if node.ref.type != .VALUE { 
+                    node.flags |= { .REFERENCES_RESOLVED }
                     return { .PROGRESS, .COMPLETE }
                 }
                 
                 // value ref to value ref cannot be resolved yet
                 if node.ref.node.type == .REF && node.ref.node.ref.type == .VALUE {
+                    log("WARNING: Cannot resolve value ref to value ref: %v", format_node_path(node))
                     return { }
                 }
                 
@@ -499,6 +518,12 @@ validate_node_references :: proc(using parser: ^DOM_Parser) -> bool {
                 
                 if .BIND_PARENT in node.flags {
                     assert(ref_node.type == .OBJECT, "ref node with bind parent flag was not pointing to an object.")
+                
+                    // we can't copy these nodes until they are all resolved, otherwise we get issues
+                    if .REFERENCES_RESOLVED not_in ref_node.flags {
+                        return { }
+                    }
+                
                     parent := node.parent
                     for child := ref_node.first; child != nil; child = child.next {
                         dst, _ := find_child_node_by_name(parent, child.name)
@@ -506,7 +531,7 @@ validate_node_references :: proc(using parser: ^DOM_Parser) -> bool {
                         dst = append_child_node(parent)
                         if !clone_node_recursive(dst, child) do return { .ERROR }
                     }
-                    result |= {.REMOVE_NODE}
+                    result |= { .REMOVE_NODE }
                 }
                 else {
                     name := node.name
@@ -514,12 +539,8 @@ validate_node_references :: proc(using parser: ^DOM_Parser) -> bool {
                     node.name = name
                 }
                 
-                node.flags |= {.REFERENCES_RESOLVED}
+                node.flags |= { .REFERENCES_RESOLVED }
                 return result
-                
-            case .FIELD:
-                node.flags |= {.REFERENCES_RESOLVED}
-                return { .PROGRESS, .COMPLETE }
                 
             case .INVALID:
                 log("Invalid node type in validate_node_references().")
@@ -529,22 +550,33 @@ validate_node_references :: proc(using parser: ^DOM_Parser) -> bool {
         return { .ERROR }
     }
     
+    iterations := 0
     for {
+        iterations += 1
         result: Result = { .COMPLETE }
-        child := parser.dom_root.first; 
+        child := parser.dom_root.first;
         for child != nil {
             next_child   := child.next
             child_result := recurse(parser, child)
-            if .ERROR       in child_result do return false
-            if .REMOVE_NODE in child_result do remove_node(child, node_allocator)
+            if .ERROR       in child_result {
+                log("Error while trying to resolve node references.")
+                return false
+            }
+            if .REMOVE_NODE in child_result {
+                remove_node(child, node_allocator)
+            }
             result |=  child_result & { .PROGRESS }
-            result &= (child_result & { .COMPLETE }) | ~{.COMPLETE}
+            result &= (child_result & { .COMPLETE }) | ~{ .COMPLETE }
             child = next_child
         }
         if .COMPLETE     in result do break
-        if .PROGRESS not_in result do return false
+        if .PROGRESS not_in result {
+            log("Unable to resolve node references.")
+            return false
+        }
     }
     
+    log("Resolved node references in %v iterations.", iterations)
     return true
 }
 
@@ -630,7 +662,7 @@ construct_dom_from_gon_file :: proc(using parser: ^DOM_Parser) -> bool {
         
         // field value ref without name inside an object will create an unnamed field with the same data binding as the parent object
         if parent.type == .OBJECT && peek_token(&tokenizer).type == .REF_VALUE {
-            flags |= {.BIND_PARENT}
+            flags |= { .BIND_PARENT }
         } else {
             // read field name
             if parent.type != .ARRAY {
@@ -1054,6 +1086,7 @@ add_data_binding_to_node :: proc(node: ^DOM_Node, binding: any) -> bool  {
                 case .VALUE: 
                     fmt.printfln("Trying to bind to a value ref node @ %v!", format_node_path(node))
                     return false
+                    
                 case .INDEX:
                     #partial switch tiv in binding_ti.variant {
                         case runtime.Type_Info_Integer,
@@ -1062,6 +1095,7 @@ add_data_binding_to_node :: proc(node: ^DOM_Node, binding: any) -> bool  {
                         case:
                             return false
                     }
+                    
                 case .POINTER:
                     // all we can do here is check that the data binding is actually a pointer type
                     tip, ok := binding_ti.variant.(runtime.Type_Info_Pointer)
