@@ -37,17 +37,12 @@ File_Format :: enum {
     // XML,
 }
 
-Token :: struct {
-    type: Token_Type,
-    text: string,
-}
-
 // refactor so that it is easier to add user implementations
 SAX_Tokenizer :: struct {
     type: File_Format,
     using variant: struct #raw_union {
         json : json.Tokenizer,
-        gon  : GON_Tokenizer,
+        gon  : Tokenizer,
     },
 }
 

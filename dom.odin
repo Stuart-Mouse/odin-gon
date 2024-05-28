@@ -43,10 +43,9 @@ DOM_Node :: struct {
     next         : ^DOM_Node, 
     prev         : ^DOM_Node, 
 
-    // source_location: struct { line, char: int },
+    source_line  : int,
 
     name         : string,
-    // name         : Token,
     type         : Field_Type,
     flags        : DOM_Node_Flags,
     data_binding : any,
@@ -58,7 +57,7 @@ DOM_Node :: struct {
             type : DOM_Node_Ref_Type,
         },
         
-        value: Token,
+        value: Token, // probably change back to just string
         
         using children: struct { 
             first : ^DOM_Node,
@@ -75,10 +74,6 @@ Node_Insertion_Behaviour :: enum {
 }
 
 get_node_index :: proc(node: ^DOM_Node) -> int {
-    // if node.parent == nil do return 0
-    // if .ARRAY_INDEXED in node.parent.flags {
-    //     return strconv.atoi(node.name)
-    // }
     index := 0
     for n := node.prev; n != nil; n = n.prev {
         index += 1
@@ -114,7 +109,7 @@ find_node_by_path :: proc(node: ^DOM_Node, path: string) -> (^DOM_Node, int) {
     node  := node
     index := 0
     
-    t: GON_Tokenizer = { file = path }
+    t: Tokenizer = { file = path }
     consume_token(&t)
     
     for node != nil {
@@ -211,7 +206,7 @@ get_or_add_child_node :: proc(parent: ^DOM_Node, name: string, behavior: Node_In
 append_node_with_path :: proc(parent: ^DOM_Node, path: string, behavior: Node_Insertion_Behaviour = .DEFAULT, prepend := false, allocator := context.allocator) -> ^DOM_Node {
     node := parent
     
-    t: GON_Tokenizer = { file = path }
+    t: Tokenizer = { file = path }
     consume_token(&t)
     
     for {
@@ -286,7 +281,7 @@ clone_node_recursive :: proc(dst: ^DOM_Node, src: ^DOM_Node, allocator := contex
     return true
 }
 
-get_next_token_from_path_string :: proc(t: ^GON_Tokenizer) -> (Token, bool) {
+get_next_token_from_path_string :: proc(t: ^Tokenizer) -> (Token, bool) {
     next, ok := get_token(t)
     if !ok do return {}, false
     
@@ -341,7 +336,7 @@ format_node_path :: proc(node: ^DOM_Node) -> string {
     
 */
 
-DOM_Parser_Callback :: proc(^DOM_Node) -> bool
+DOM_Parser_Callback :: proc(^DOM_Node) -> Callback_Results
 
 DOM_Parse_Flags :: bit_set[DOM_Parse_Flag]
 DOM_Parse_Flag  :: enum {
@@ -350,7 +345,7 @@ DOM_Parse_Flag  :: enum {
 
 // used to build a DOM from a text file and evaluate data bindings on that DOM
 DOM_Parser :: struct {
-    tokenizer      : GON_Tokenizer,
+    tokenizer      : Tokenizer,
     dom_root       : ^DOM_Node,
     log            : Log_Proc,
     node_allocator : runtime.Allocator,
@@ -360,6 +355,7 @@ DOM_Parser :: struct {
 init_dom_parser :: proc(using parser: ^DOM_Parser, _file: string, _allocator := context.allocator) {
     node_allocator = _allocator
     tokenizer.file = _file
+    tokenizer.line = 1;
     consume_token(&tokenizer) // get the first token when we init, we always pull one token ahead of the one we return
     
     // ensure that parse context is properly init'd
@@ -418,7 +414,9 @@ add_data_bindings_to_dom :: proc(using parser: ^DOM_Parser, bindings: [] struct 
             
         serialization
             + plain old data, default formatting
-            - sameline flag with somewhat intelligent defaults
+            + sameline flag with somewhat intelligent defaults
+                + store source line number on node
+                    + use this to set sameline flag on parsed nodes
             - indexed arrays
             - callbacks / fully custom formatting
 
@@ -428,7 +426,6 @@ add_data_bindings_to_dom :: proc(using parser: ^DOM_Parser, bindings: [] struct 
         validate field refs
         insert data bindings onto nodes
         process data bindings
-    
 
     
     TODO: 
@@ -587,12 +584,17 @@ process_data_bindings :: proc(using parser: ^DOM_Parser) -> bool {
 process_node_binding :: proc(using parser: ^DOM_Parser, node: ^DOM_Node) -> bool {
     if .BINDING_RESOLVED in node.flags do return true
     
+    callback_results: Callback_Results
     for callback in callbacks {
         if callback != nil {
-            if !callback(node) {
+            callback_results |= callback(node)
+            if .ERROR in callback_results {
                 return false
             }
         }
+    }
+    if .SKIP_BINDING in callback_results {
+        return true
     }
     
     #partial switch node.type {
@@ -605,7 +607,20 @@ process_node_binding :: proc(using parser: ^DOM_Parser, node: ^DOM_Node) -> bool
             return true
             
         case .FIELD: 
-            return node.data_binding == nil || set_value_from_string(node.data_binding, node.value.text)
+            if node.data_binding == nil do return true
+            
+            if binding_io_data, found := &IO_Data_Lookup[node.data_binding.id]; found {
+                using binding_io_data.parse
+                if parse_proc_2 != nil {
+                    if !parse_proc_2(node.data_binding, node.value.text) {
+                        fmt.println("Error, parse_proc() failed.")
+                        return false
+                    }
+                    return true
+                }
+            }
+            
+            return set_value_from_string(node.data_binding, node.value.text)
             
         case .REF:
             assert(node.ref.node != nil, "ref node was nil")
@@ -656,9 +671,10 @@ construct_dom_from_gon_file :: proc(using parser: ^DOM_Parser) -> bool {
     
     parent := dom_root
     L_Loop: for parent != nil {
-        name, text : string
-        type  : Field_Type
-        flags : DOM_Node_Flags
+        name, text  : string
+        type        : Field_Type
+        flags       : DOM_Node_Flags
+        source_line : int
         
         // field value ref without name inside an object will create an unnamed field with the same data binding as the parent object
         if parent.type == .OBJECT && peek_token(&tokenizer).type == .REF_VALUE {
@@ -668,30 +684,35 @@ construct_dom_from_gon_file :: proc(using parser: ^DOM_Parser) -> bool {
             if parent.type != .ARRAY {
                 next_token, ok = get_token(&tokenizer)
                 if !ok {
-                    log("GON tokenization error: Unexpected %v token \"%v\".", next_token.type, next_token.text)
-                    return true
+                    err_token := peek_token(&tokenizer)
+                    log("GON tokenization error: Unexpected %v token \"%v\" on line %v.", err_token.type, err_token.text, err_token.line)
+                    return false
                 }
                 #partial switch next_token.type {
                     case .STRING: 
                         name = next_token.text
+                        source_line = next_token.line
                         
                     case .EOF:
                         if parent != dom_root {
-                            log("GON parse error: Unexpected %v token \"%v\".", next_token.type, next_token.text)
+                            log("GON parse error: Unexpected %v token \"%v\". on line %v", next_token.type, next_token.text, next_token.line)
                             return true
                         }
                         break L_Loop
                         
                     case .OBJECT_END:
                         if parent.type != .OBJECT {
-                            log("GON parse error: Unexpected %v token \"%v\".", next_token.type, next_token.text)
+                            log("GON parse error: Unexpected %v token \"%v\" on line %v.", next_token.type, next_token.text, next_token.line)
                             return true
+                        }
+                        if next_token.line == parent.source_line {
+                            parent.flags |= { .SAME_LINE }
                         }
                         parent = parent.parent
                         continue
                         
                     case:
-                        log("GON parse error: Unexpected %v token \"%v\".", next_token.type, next_token.text)
+                        log("GON parse error: Unexpected %v token \"%v\" on line %v.", next_token.type, next_token.text, next_token.line)
                         return true
                 }
             }
@@ -699,8 +720,9 @@ construct_dom_from_gon_file :: proc(using parser: ^DOM_Parser) -> bool {
         
         next_token, ok = get_token(&tokenizer)
         if !ok {
-            log("GON tokenization error: Unexpected %v token \"%v\".", next_token.type, next_token.text)
-            return true
+            err_token := peek_token(&tokenizer)
+            log("GON tokenization error: Unexpected %v token \"%v\" on line %v.", err_token.type, err_token.text, err_token.line)
+            return false
         }
         
         if next_token.type == .REF_INDEX   || 
@@ -720,7 +742,8 @@ construct_dom_from_gon_file :: proc(using parser: ^DOM_Parser) -> bool {
             
             next_token, ok = get_token(&tokenizer)
             if !ok {
-                log("GON tokenization error: Unexpected %v token \"%v\".", next_token.type, next_token.text)
+                err_token := peek_token(&tokenizer)
+                log("GON tokenization error: Unexpected %v token \"%v\" on line %v.", err_token.type, err_token.text, err_token.line)
                 return false
             }
             if next_token.type != .STRING {
@@ -735,25 +758,32 @@ construct_dom_from_gon_file :: proc(using parser: ^DOM_Parser) -> bool {
                 case .STRING: 
                     type = .FIELD
                     text = next_token.text
+                    if source_line <= 0 {
+                        source_line = next_token.line
+                    }
                 case .OBJECT_BEGIN: 
                     type = .OBJECT
                 case .ARRAY_BEGIN: 
                     type = .ARRAY
                 case .ARRAY_END:
                     if parent.type != .ARRAY {
-                        log("GON parse error: Unexpected %v token \"%v\".", next_token.type, next_token.text)
+                        log("GON parse error: Unexpected %v token \"%v\". on line %v", next_token.type, next_token.text, next_token.line)
                         return false
+                    }
+                    if next_token.line == parent.source_line {
+                        parent.flags |= { .SAME_LINE }
                     }
                     parent = parent.parent
                     continue
                 case:
-                    fmt.printfln("GON parse error: Unexpected %v token \"%v\".", next_token.type, next_token.text)
+                    fmt.printfln("GON parse error: Unexpected %v token \"%v\". on line %v", next_token.type, next_token.text, next_token.line)
                     return false
             }
             
             assert(type != .INVALID)
             
             node := append_child_node(parent)
+            node.source_line = source_line
             node.name  = name
             node.type  = type
             node.flags = flags
@@ -776,8 +806,21 @@ add_data_binding_to_node :: proc(node: ^DOM_Node, binding: any) -> bool  {
         fmt.println("Error, node already has a data binding set...")
         return false
     }
-    node.data_binding = binding
     
+    // check if we need to modify binding based on io data
+    // if binding_io_data, found := *IO_Data_Lookup[binding.id]; found {
+    //     using binding_io_data.parse
+    //     if bind_proc != nil {
+    //         binding = bind_proc(binding)
+    //         if binding.data == nil {
+    //             fmt.println("Error, bind_proc() returned nil.")
+    //             return false
+    //         }
+    //     }
+    // }
+    
+    node.data_binding = binding
+
     // binding, _ = deref_any_pointer(binding)
     binding_ti := runtime.type_info_base(type_info_of(binding.id))
     
@@ -1063,6 +1106,10 @@ add_data_binding_to_node :: proc(node: ^DOM_Node, binding: any) -> bool  {
                      runtime.Type_Info_Enum,
                      runtime.Type_Info_String,
                      runtime.Type_Info_Boolean:
+                     
+                case runtime.Type_Info_Struct: 
+                    // TODO: for now, permitting all structs here
+                    // in future may want to precheck that there is some custom parse proc for this type
                 
                 case runtime.Type_Info_Bit_Set: 
                     // For bit sets, both the enclosing array and the individual elements have the same binding

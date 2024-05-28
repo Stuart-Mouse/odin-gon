@@ -54,7 +54,12 @@ Parse_Flag :: enum {
 
 Parse_Settings :: struct {
     flags      : Parse_Flags,
-    parse_proc : proc(^Parser, ^SAX_Field) -> SAX_Return_Code
+    parse_proc : proc(^Parser, ^SAX_Field) -> SAX_Return_Code, // TODO: remove when possible
+    
+    // remap a data binding (e.g. struct to only one member) 
+    // maybe later, we actually expand this to allow user to create the nodes manually
+    bind_proc    : proc(any) -> any,
+    parse_proc_2 : proc(value: any, text: string) -> bool,
 }
 
 
@@ -100,3 +105,9 @@ register_io_data :: proc(type: typeid, io_data: IO_Data) {
 //     io_data.name_member = reflect.struct_field_by_name(type, member_name)
 //     return true
 // }
+
+Callback_Results     :: bit_set[Callback_Result_Flag]
+Callback_Result_Flag :: enum {
+    ERROR,
+    SKIP_BINDING,
+}

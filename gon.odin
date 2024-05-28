@@ -32,25 +32,6 @@ log_print :: proc(format: string, args: ..any, loc := #caller_location) { fmt.pr
     So the parse_file proc should probably be responsible for making sure that things such as the log proc are set validly.
 */
 
-whitespace_chars :: " ,\t\r\n\x00"
-reserved_chars   :: "~!@#$%^&*{}[]\""
-whitespace_and_reserved_chars :: " ,\t\r\n#{}[]\"\x00"
-
-Token_Type :: enum u8 {
-    INVALID,
-    STRING,
-    OBJECT_BEGIN,
-    OBJECT_END,
-    ARRAY_BEGIN,
-    ARRAY_END,
-    REF_INDEX,
-    REF_POINTER,
-    REF_VALUE,
-    PATH_SPLIT,
-    PATH_HERE,
-    PATH_PARENT,
-    EOF,
-}
 
 Field_Type :: enum u8 { 
     INVALID = 0, 

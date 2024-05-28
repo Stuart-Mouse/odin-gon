@@ -112,7 +112,7 @@ serialize_dom_nodes_to_gon :: proc(using serializer: ^Serializer, node: ^DOM_Nod
     if node.parent != nil {
         in_array       = node.parent.type == .ARRAY
         is_first_child = node == node.parent.first
-        same_line      = (.SAME_LINE in node.parent.flags)
+        same_line      = (.SAME_LINE in node.parent.flags)      // check for sameline on parent, not self (we do that later)
     }
     
     if same_line || in_array {
@@ -137,10 +137,11 @@ serialize_dom_nodes_to_gon :: proc(using serializer: ^Serializer, node: ^DOM_Nod
     
     #partial switch node.type {
         case .OBJECT, .ARRAY: 
+            // ensure that end of object/array gets printed on same line if sameline flag is set on self
+            same_line ||= (.SAME_LINE in node.flags)
+        
             is_array := (node.type == .ARRAY)
             if is_array {
-                // TODO: this works fine when nodes have a data binding, but not when printing nodes parsed directly from file
-                // If we want this to have proper formatting in that case, then we need to mark nodes as sameline when we parse them in
                 elem_tid := node.first.data_binding.id
                 if do_sameline_for_type(elem_tid) {
                     node.flags |= { .SAME_LINE }
