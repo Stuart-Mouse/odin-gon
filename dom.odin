@@ -403,13 +403,16 @@ add_data_bindings_to_dom :: proc(using parser: ^DOM_Parser, bindings: [] struct 
                 + store key value to map key member
             - enumerated arrays
             - indexing normal arrays with enums?
-                - just add enum typeid in io_data for array ezpz
+                + just add enum typeid in io_data for array ezpz
             + field refs
                 + traverse nodes by relative field path
                 + get index
                 + get binding value / or fallback to string value
                 + get binding pointer
-            - callbacks / fully custom formatting
+            - callbacks
+                + ability to remap data binding
+                + ability to add custom parsing in a callback and skip normal bindings
+                - consider and improve
             - expression evaluation with lead sheets integration
             
         serialization
@@ -425,7 +428,10 @@ add_data_bindings_to_dom :: proc(using parser: ^DOM_Parser, bindings: [] struct 
         construct dom from file
         validate field refs
         insert data bindings onto nodes
-        process data bindings
+        final walk over dom
+            run callbacks
+            process data bindings
+            
 
     
     TODO: 
@@ -907,8 +913,8 @@ add_data_binding_to_node :: proc(node: ^DOM_Node, binding: any) -> bool  {
                 case runtime.Type_Info_Dynamic_Array:
                     raw_array := cast(^runtime.Raw_Dynamic_Array) node.data_binding.data
                 
-                    io_data, found := &IO_Data_Lookup[binding_ti.id]
-                    if found && .ARRAY_INDEXED in io_data.parse.flags {
+                    io_data, io_data_found := &IO_Data_Lookup[binding_ti.id]
+                    if io_data_found && .ARRAY_INDEXED in io_data.parse.flags {
                         node.flags |= { .ARRAY_INDEXED }
                     } else {
                         elem_ti := runtime.type_info_base(tiv.elem)
@@ -926,7 +932,12 @@ add_data_binding_to_node :: proc(node: ^DOM_Node, binding: any) -> bool  {
                     for child := node.first; child != nil; child = child.next {
                         elem_any: any
                         if .ARRAY_INDEXED in node.flags {
-                            elem_index := strconv.atoi(child.name)
+                            elem_index: int
+                            if io_data.enum_index_type != {} {
+                                elem_index = auto_cast reflect.enum_from_name_any(io_data.enum_index_type, child.name) or_return
+                            } else {
+                                elem_index = strconv.atoi(child.name)
+                            }
                             elem_any = array_add_any_at_index(node.data_binding, elem_index)
                         } else {
                             elem_any = any {
@@ -962,7 +973,12 @@ add_data_binding_to_node :: proc(node: ^DOM_Node, binding: any) -> bool  {
                     if found && .ARRAY_INDEXED in io_data.parse.flags {
                         node.flags |= { .ARRAY_INDEXED }
                         for child := node.first; child != nil; child = child.next {
-                            elem_index := strconv.atoi(child.name)
+                            elem_index: int
+                            if io_data.enum_index_type != {} {
+                                elem_index = auto_cast reflect.enum_from_name_any(io_data.enum_index_type, child.name) or_return
+                            } else {
+                                elem_index = strconv.atoi(child.name)
+                            }
                             if elem_index >= elem_count {
                                 fmt.println("Error: array index is out of bounds.")
                                 return false
