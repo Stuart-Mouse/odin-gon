@@ -48,7 +48,7 @@ init_serializer :: proc(using serializer: ^Serializer, root: ^DOM_Node = nil, _a
     }
 }
 
-destroy_serializer :: proc(using serializer: ^Serializer) {
+deinit_serializer :: proc(using serializer: ^Serializer) {
     strings.builder_destroy(&builder)
     if do_free_nodes {
         delete_child_nodes_recursive(dom_root)

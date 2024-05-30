@@ -363,11 +363,18 @@ init_dom_parser :: proc(using parser: ^DOM_Parser, _file: string, _allocator := 
     if log == nil do log = log_stub
 }
 
+deinit_dom_parser :: proc(using parser: ^DOM_Parser) {
+    delete_child_nodes_recursive(dom_root, node_allocator)
+    free(dom_root, node_allocator)
+    dom_root = nil
+    delete(callbacks)
+}
+
 // creates a dom parser with the given parameters, intializes it, and constructs the dom from the given file
 // after calling this, you can just add your data bindings and then process them
-parse_file_to_dom :: proc(_file: string, _allocator := context.allocator) -> (DOM_Parser, bool) {
-    parser: DOM_Parser
+parse_file_to_dom :: proc(_file: string, _allocator := context.allocator) -> (parser: DOM_Parser, ok: bool) {
     init_dom_parser(&parser, _file, _allocator)
+    defer if !ok do deinit_dom_parser(&parser)
     
     if !construct_dom_from_gon_file(&parser) do return {}, false
     if !validate_node_references   (&parser) do return {}, false
@@ -401,8 +408,8 @@ add_data_bindings_to_dom :: proc(using parser: ^DOM_Parser, bindings: [] struct 
             + map types
                 + support key types other than string
                 + store key value to map key member
-            - enumerated arrays
-            - indexing normal arrays with enums?
+            + enumerated arrays
+            + indexing normal arrays with enums?
                 + just add enum typeid in io_data for array ezpz
             + field refs
                 + traverse nodes by relative field path
@@ -841,9 +848,17 @@ add_data_binding_to_node :: proc(node: ^DOM_Node, binding: any) -> bool  {
             
             #partial switch tiv in binding_ti.variant {
                 case runtime.Type_Info_Struct:
+                    io_data, io_data_found := &IO_Data_Lookup[node.data_binding.id]
+                    
+                    name_member_name: string
+                    if io_data_found do name_member_name = io_data.name_member.name
+                    is_name_set := false
+                    
                     for child := node.first; child != nil; child = child.next {
                         member := reflect.struct_field_by_name(node.data_binding.id, child.name) 
                         if member == {} do continue
+                        if member.name == name_member_name do is_name_set = true
+                        
                         member_any := any {
                             data = mem.ptr_offset(cast(^u8)node.data_binding.data, member.offset),
                             id   = member.type.id,
@@ -851,13 +866,23 @@ add_data_binding_to_node :: proc(node: ^DOM_Node, binding: any) -> bool  {
                         add_data_binding_to_node(child, member_any)
                     }
                     
-                    // TODO: maybe we want error handling when name member is missing, especially if parent type is array-object 
-                    type_io_data, found := IO_Data_Lookup[node.data_binding.id]
-                    if found {
-                        if type_io_data.name_member != {} {
+                    L_Assign_Name: if io_data_found && !is_name_set {
+                        // check parent attributes and maybe skip assigning name member
+                        if node.parent != nil {
+                            if .ARRAY_INDEXED in node.parent.flags do break L_Assign_Name
+                        
+                            if node.parent.data_binding.data != nil {
+                                parent_ti := reflect.type_info_base(type_info_of(node.parent.data_binding.id))
+                                _, parent_is_map := parent_ti.variant.(runtime.Type_Info_Map)
+                                if parent_is_map do break L_Assign_Name
+                            }
+                        }
+                        
+                        // TODO: maybe we want error handling when name member is missing, especially if parent type is array-object 
+                        if io_data.name_member != {} {
                             member_any := any {
-                                data = mem.ptr_offset(cast(^u8)node.data_binding.data, type_io_data.name_member.offset),
-                                id   = type_io_data.name_member.type.id,
+                                data = mem.ptr_offset(cast(^u8)node.data_binding.data, io_data.name_member.offset),
+                                id   = io_data.name_member.type.id,
                             }
                             if !set_value_from_string(member_any, node.name) {
                                 return false
@@ -922,38 +947,44 @@ add_data_binding_to_node :: proc(node: ^DOM_Node, binding: any) -> bool  {
                         if is_struct {
                             node.flags |= { .ARRAY_AS_OBJECT }
                         }
+                        // TODO: maybe error when elem type here is not a struct
                         if !reserve_any_dynamic_array(node.data_binding, node.count) { 
                             return false
                         }
                         raw_array.len = node.count
                     }
                     
-                    index := 0
-                    for child := node.first; child != nil; child = child.next {
-                        elem_any: any
-                        if .ARRAY_INDEXED in node.flags {
+                    if .ARRAY_INDEXED in node.flags {
+                        for child := node.first; child != nil; child = child.next {
                             elem_index: int
                             if io_data.enum_index_type != {} {
                                 elem_index = auto_cast reflect.enum_from_name_any(io_data.enum_index_type, child.name) or_return
                             } else {
                                 elem_index = strconv.atoi(child.name)
                             }
-                            elem_any = array_add_any_at_index(node.data_binding, elem_index)
-                        } else {
-                            elem_any = any {
+                            elem_any := array_add_any_at_index(node.data_binding, elem_index)
+                            add_data_binding_to_node(child, elem_any)
+                        }
+                    } else {
+                        index := 0
+                        for child := node.first; child != nil; child = child.next {
+                            elem_any := any {
                                 data = mem.ptr_offset(cast(^u8)raw_array.data, tiv.elem.size * index),
                                 id   = tiv.elem.id,
                             }
+                            add_data_binding_to_node(child, elem_any)
+                            index += 1
                         }
-                        add_data_binding_to_node(child, elem_any)
-                        index += 1
                     }
                     
-                case runtime.Type_Info_Array, runtime.Type_Info_Slice:
+                    
+                case runtime.Type_Info_Array, runtime.Type_Info_Slice, runtime.Type_Info_Enumerated_Array:
                     io_data, found := &IO_Data_Lookup[binding_ti.id]
 
                     data       : rawptr
                     elem_count : int
+                    min_value  : int
+                    max_value  : int
                     elem_ti    : ^runtime.Type_Info
                     
                     // disambiguate array/slice
@@ -962,12 +993,21 @@ add_data_binding_to_node :: proc(node: ^DOM_Node, binding: any) -> bool  {
                             data       = node.data_binding.data
                             elem_count = tiv.count
                             elem_ti    = tiv.elem
+                            max_value  = elem_count-1
                 
                         case runtime.Type_Info_Slice:
                             raw_slice := cast(^runtime.Raw_Slice) node.data_binding.data
                             data       = raw_slice.data
                             elem_count = raw_slice.len
                             elem_ti    = tiv.elem
+                            max_value  = elem_count-1
+                            
+                        case runtime.Type_Info_Enumerated_Array:
+                            data       = node.data_binding.data
+                            elem_count = tiv.count
+                            elem_ti    = tiv.elem
+                            min_value  = auto_cast tiv.min_value
+                            max_value  = auto_cast tiv.max_value
                     }
                     
                     if found && .ARRAY_INDEXED in io_data.parse.flags {
@@ -979,7 +1019,7 @@ add_data_binding_to_node :: proc(node: ^DOM_Node, binding: any) -> bool  {
                             } else {
                                 elem_index = strconv.atoi(child.name)
                             }
-                            if elem_index >= elem_count {
+                            if elem_index < min_value || elem_index > max_value {
                                 fmt.println("Error: array index is out of bounds.")
                                 return false
                             }
@@ -1008,22 +1048,15 @@ add_data_binding_to_node :: proc(node: ^DOM_Node, binding: any) -> bool  {
                         
                         index := 0
                         for child := node.first; child != nil; child = child.next {
+                            elem_index := index - min_value;
                             elem_any := any {
-                                data = mem.ptr_offset(cast(^u8)data, elem_ti.size * index),
+                                data = mem.ptr_offset(cast(^u8)data, elem_ti.size * elem_index),
                                 id   = elem_ti.id,
                             }
                             add_data_binding_to_node(child, elem_any)
                             index += 1
                         }
                     }
-                    
-                    /* 
-                        TODO: 
-                        GON objects can only validly be bound to arrays when the element type is a struct,
-                        or if it is an indexed array (where the name of each field is the index to which the value will be stored).
-                        So, we should perform a check to ensure that these conditions are met, else return an error.
-                        The user will have to state explicitly that they want to parse a given array binding as an indexed array, otherwise there is some ambiguity as to how to handle ths situation.
-                    */
                     
                 case:
                     fmt.println("Invalid data binding, mismatched gon/internal type.")
@@ -1122,7 +1155,7 @@ add_data_binding_to_node :: proc(node: ^DOM_Node, binding: any) -> bool  {
                      runtime.Type_Info_Enum,
                      runtime.Type_Info_String,
                      runtime.Type_Info_Boolean:
-                     
+                    
                 case runtime.Type_Info_Struct: 
                     // TODO: for now, permitting all structs here
                     // in future may want to precheck that there is some custom parse proc for this type

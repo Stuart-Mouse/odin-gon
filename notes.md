@@ -219,7 +219,7 @@ encountering this token would require that the next field parsed is in fact a .F
 
 ! directive_name
 
-overrides parsing at the level of tokenization and eneters a user callback to handle the data stream
+overrides parsing at the level of tokenization and enters a user callback to handle the data stream
 when the callback returns, the tokenizer will pick back up where it left off, with whatever state it was in or whatever state the user has modified.
 
 This should probably be used very springly, but I think it may serve some purpose for small projects / files that are for internal use only
@@ -751,4 +751,47 @@ Old notes moved from dom_new file, probably not useful anymore:
                 shallow copy of walk to jump and fall
                 deep copy of green koopa with offsets added to frames
 
+
+Parsing/serialization of binary files
+
+The protobuffs ripoff approach
+
+match two data structures against one another using duck typing
+use ti to match fields by name and type
+    if either name or type does not match, then we fail to match that piece of data
+    across versions, we probably want to have some remapping possible, so we can change a name if need be
+
+remapping
+    match struct fields by name and type
+        explicit user-defined remappings between versions
+    conversions between numeric types
+    conversions between arrays of different lengths, types (fixed/resizable/view)
+        maybe allow implicit []u8 types to convert to/from strings
+
+serialize a Type_Info structure to gon
+can use this as our makeshift protobufs file
+
+a file type can be defined solely as some data structure 
+memcpy all bytes of top-level structure into file
+introspect over data structure and deep copy data as needed, appending copied data to end of file
+store u64 index to this data in place of pointers
+convert these back to pointers on the way back out by adding relative offset
+
+
+serialize typeinfo structures to / load from gon
+have some facility to remap data from one typeinfo to another
+binary data file needs a version that we can use to get the correct typeinfo file
+need robust deep copy and ability to remap pointers to/from u64 indices
+
+
+
+
+
+fixing memory leaks
+
+do not assign struct name member if parent is an indexed array or is a map type
+    in future, probably just set a flag on parent node for this rather than perform these checks in struct processing
+do not assign struct name member from gon object name if it is already set by a child gon field    
+
+properly deinit parser and serializer
 
