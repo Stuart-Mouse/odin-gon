@@ -7,6 +7,7 @@ import "core:strings"
 import "core:strconv"
 import "core:mem"
 import "core:math"
+import "core:encoding/json"
 
 
 whitespace_chars :: " ,\t\r\n\x00"
@@ -35,15 +36,25 @@ Token_Type :: enum u8 {
 }
 
 Tokenizer :: struct {
+    type       : File_Format,
+    next_token : Token,
+    
+    // not bothering to put specific tokenizers in union for now, 
+    // since gon tokenizer is literally just the remaining string and line count
+    // gon tokenizer
     file       : string,
     line       : int, 
-    next_token : Token,
+    // json tokenizer
+    json_tokenizer: json.Tokenizer,
 }
 
 consume_token :: proc(using t: ^Tokenizer) -> bool {
     if next_token.type == .EOF do return true
     ok: bool
-    next_token, ok = lex_next_token(t)
+    switch type {
+        case .GON : next_token, ok = lex_next_token(t)
+        case .JSON: next_token, ok = lex_next_token_json(&t.json_tokenizer)
+    }
     return ok
 }
 

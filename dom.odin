@@ -8,6 +8,7 @@ import "core:strings"
 import "core:strconv"
 import "core:mem"
 import "core:math"
+import "core:encoding/json"
 
 /*
     After getting some of the basic stuff working for the DOM thing, I may be able to use it to generate parsing procedures for binary data as well.
@@ -352,15 +353,22 @@ DOM_Parser :: struct {
     callbacks      : [dynamic] DOM_Parser_Callback,
 }
 
-init_dom_parser :: proc(using parser: ^DOM_Parser, _file: string, _allocator := context.allocator) {
-    node_allocator = _allocator
-    tokenizer.file = _file
-    tokenizer.line = 1;
-    consume_token(&tokenizer) // get the first token when we init, we always pull one token ahead of the one we return
+init_dom_parser :: proc(parser: ^DOM_Parser, file: string, format: File_Format = .GON, node_allocator := context.allocator) {
+    parser.node_allocator = node_allocator
     
-    // ensure that parse context is properly init'd
-    if log == nil do log = default_log_proc
-    if log == nil do log = log_stub
+    parser.tokenizer.type = format
+    switch format {
+        case .GON:
+            parser.tokenizer.file = file
+            parser.tokenizer.line = 1
+        case .JSON:
+            parser.tokenizer.json_tokenizer = json.make_tokenizer(file)
+    }
+        
+    consume_token(&parser.tokenizer) // get the first token when we init, we always pull one token ahead of the one we return
+    
+    if parser.log == nil do parser.log = default_log_proc
+    if parser.log == nil do parser.log = log_stub
 }
 
 deinit_dom_parser :: proc(using parser: ^DOM_Parser) {
@@ -372,8 +380,8 @@ deinit_dom_parser :: proc(using parser: ^DOM_Parser) {
 
 // creates a dom parser with the given parameters, intializes it, and constructs the dom from the given file
 // after calling this, you can just add your data bindings and then process them
-parse_file_to_dom :: proc(_file: string, _allocator := context.allocator) -> (parser: DOM_Parser, ok: bool) {
-    init_dom_parser(&parser, _file, _allocator)
+parse_file_to_dom :: proc(file: string, format: File_Format = .GON, allocator := context.allocator) -> (parser: DOM_Parser, ok: bool) {
+    init_dom_parser(&parser, file, format, allocator)
     defer if !ok do deinit_dom_parser(&parser)
     
     if !construct_dom_from_gon_file(&parser) do return {}, false
@@ -586,7 +594,7 @@ validate_node_references :: proc(using parser: ^DOM_Parser) -> bool {
         }
     }
     
-    log("Resolved node references in %v iterations.", iterations)
+    // log("Resolved node references in %v iterations.", iterations)
     return true
 }
 
@@ -813,7 +821,7 @@ construct_dom_from_gon_file :: proc(using parser: ^DOM_Parser) -> bool {
 }
 
 add_data_binding_to_node :: proc(node: ^DOM_Node, binding: any) -> bool  {
-    if node == nil || binding.data == nil do return false
+    if node == nil || binding.data == nil do return true
     
     if node.data_binding.data != nil {
         fmt.println("Error, node already has a data binding set...")
@@ -1059,7 +1067,7 @@ add_data_binding_to_node :: proc(node: ^DOM_Node, binding: any) -> bool  {
                     }
                     
                 case:
-                    fmt.println("Invalid data binding, mismatched gon/internal type.")
+                    fmt.println("Invalid data binding, mismatched gon/internal type: %v vs %v", node.type, binding.id)
                     return false
             }
         
@@ -1144,7 +1152,7 @@ add_data_binding_to_node :: proc(node: ^DOM_Node, binding: any) -> bool  {
                     }
                     
                 case:
-                    fmt.println("Data binding error: mismatched gon/internal type.")
+                    fmt.println("Data binding error: mismatched gon/internal type: %v vs %v", node.type, binding.id)
                     return false
             }
 
@@ -1173,7 +1181,7 @@ add_data_binding_to_node :: proc(node: ^DOM_Node, binding: any) -> bool  {
                 case runtime.Type_Info_Slice         : if tiv.elem.size != 1 do return false
                 
                 case:
-                    fmt.println("Invalid data binding, mismatched gon/internal type.")
+                    fmt.println("Invalid data binding, mismatched gon/internal type: %v vs %v", node.type, binding.id)
                     return false
             }
 
