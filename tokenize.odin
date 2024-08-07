@@ -212,11 +212,6 @@ skip_whitespace_and_comments :: proc(file: ^string) -> bool {
     }
 }
 
-// returns the unescaped character and the length of the escape sequence in characters
-// return -1 on failure?
-// parse_escape_sequence :: proc(str: string) -> (u8, int) {
-//     // TODO
-// }
 
 
 /*

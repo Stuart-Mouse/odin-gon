@@ -87,9 +87,12 @@ set_value_from_string :: proc(value: any, text: string, no_copy := false, loc :=
             return true
 
         case Type_Info_String:
+            // NOTE: was concerned about a memory leak here if field is assigned more than once, but I dont think that can happen in dom mode
+                // bc we can't have multiple nodes with same path/id I think (need to verify this again and also consider how field refs affect this)
+            // TODO: no_copy currently won't process escape sequences, because that requires making a new string (obviously)
             string_value := text
             if !no_copy {
-                string_value = strings.clone(string_value, loc = loc)
+                string_value = unescape_string(string_value) or_return
             }
             if tiv.is_cstring {
                 (cast(^cstring)value.data)^ = cstring(raw_data(string_value))
@@ -127,9 +130,13 @@ set_value_from_string :: proc(value: any, text: string, no_copy := false, loc :=
             if tiv.elem.size != 1 {
                 return false
             }
-            (cast(^string)value.data)^ = strings.clone(text)
+            string_value := text
+            if !no_copy {
+                string_value = unescape_string(string_value) or_return
+            }
+            (cast(^string)value.data)^ = string_value
             return true
-    
+            
         case Type_Info_Dynamic_Array:
             array      := cast(^runtime.Raw_Dynamic_Array) value.data
             elem_count := array.len
@@ -138,10 +145,16 @@ set_value_from_string :: proc(value: any, text: string, no_copy := false, loc :=
                 return false
             }
             arr_u8 := transmute(^[dynamic]u8) array
-            clear(arr_u8)
-            append_elem_string(arr_u8, text)
+            delete(arr_u8^); arr_u8^ = {}
+            
+            sb := strings.builder_make()
+            if unescape_string_into_string_builder(&sb, text) {
+                arr_u8^ = sb.buf;
+            } else {
+                strings.builder_destroy(&sb)
+            }
             return true
-
+            
         case:
             // log("Unsupported type in set_value_from_string(): %v", value.id)
             return true
@@ -404,4 +417,52 @@ dynamic_new :: proc(type: typeid, allocator := context.allocator) -> any {
         data = raw_data(buf),
         id   = type,
     }
+}
+
+
+// returns the unescaped character and the length of the escape sequence in characters
+// return -1 on failure?
+// parse_escape_sequence :: proc(str: string) -> (u8, int) {
+    
+// }
+
+
+// TODO: in the future, we want to properly parse escape sequences
+//       using the above commented out procedure
+unescape_string :: proc(str: string) -> (string, bool) {
+    str := str
+    sb  := strings.builder_make()
+    ok  := unescape_string_into_string_builder(&sb, str)
+    if !ok {
+        strings.builder_destroy(&sb)
+        return "", false
+    }
+    return strings.to_string(sb), true
+}
+
+// version where we pass the string builder in manually, so that we can unescape strings for [dynamic]u8 in set_value_from_string()
+unescape_string_into_string_builder :: proc(sb: ^strings.Builder, str: string) -> bool {
+    str := str
+    for len(str) != 0 {
+        if str[0] == '\\' {
+            if !advance(&str) {
+                return false
+            }
+            switch(str[0]) {
+              case 'n':
+                strings.write_byte(sb, '\n');
+              case 'r':
+                strings.write_byte(sb, '\r');
+              case 't':
+                strings.write_byte(sb, '\t');
+                
+              case: // default to same character
+                strings.write_byte(sb, str[0]);
+            }
+        } else {
+            strings.write_byte(sb, str[0]);
+        }
+        advance(&str)
+    }
+    return true
 }
