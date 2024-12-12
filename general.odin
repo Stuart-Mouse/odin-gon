@@ -1,6 +1,6 @@
 package gon
 
-import "core:runtime"
+import "base:runtime"
 import "core:reflect"
 import "core:fmt"
 import "core:strings"
@@ -99,6 +99,7 @@ set_value_from_string :: proc(value: any, text: string, no_copy := false, loc :=
             } else {
                 (cast(^string)value.data)^ = string_value
             }
+            
             return true
 
         case Type_Info_Boolean:
@@ -257,6 +258,39 @@ reserve_any_dynamic_array :: proc(array: any, capacity: int) -> bool {
 
 	a.data = new_data
 	a.cap  = capacity
+	return true
+}
+
+
+alloc_any_slice :: proc(slice: any, count: int) -> bool {
+    if slice.data == nil {
+		return false
+	}
+    
+    ti := runtime.type_info_base(type_info_of(slice.id))
+    ti_slice, ok := ti.variant.(runtime.Type_Info_Slice)
+    if !ok {
+        return false
+    }
+    
+	s := cast(^runtime.Raw_Slice) slice.data 
+    
+	old_size  := s.len * ti_slice.elem.size
+	new_size  := count * ti_slice.elem.size
+	allocator := context.allocator // TODO: probably make this a parameter
+    
+	new_data, err := mem.resize(s.data, old_size, new_size, ti_slice.elem.align, allocator)
+	if err != nil {
+	    fmt.printfln("allocator error: %v", err)
+		return false
+	}
+	if new_data == nil && new_size > 0 {
+	    fmt.println("allocator error: ?")
+		return false
+	}
+    
+	s.data = new_data
+	s.len  = count
 	return true
 }
 

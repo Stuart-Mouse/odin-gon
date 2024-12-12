@@ -4,7 +4,7 @@ import "core:fmt"
 import "core:strconv"
 import "core:strings"
 import "core:os"
-import "core:runtime"
+import "base:runtime"
 import "core:reflect"
 import "core:mem"
 
@@ -235,10 +235,9 @@ serialize_any :: proc(
             strings.write_byte(sb, as_array    ? '[' : '{' )
             strings.write_byte(sb, on_one_line ? ' ' : '\n')
             
-            member_count  := len(tiv.names)
             member_indent := on_one_line ? 0 : indent + 2
             
-            for i in 0..<member_count {
+            for i in 0..<tiv.field_count {
                 type   := tiv.types  [i]
                 name   := tiv.names  [i]
                 offset := tiv.offsets[i]
@@ -253,7 +252,7 @@ serialize_any :: proc(
                 // member_delim := type_io_data.serialize.member_delim
                 // if member_delim == "" {
                     // I apologize for the nested ternary
-                    member_delim := on_one_line ? ((i == member_count-1) ? " " : ", ") : "\n"
+                    member_delim := on_one_line ? ((i == tiv.field_count-1) ? " " : ", ") : "\n"
                 // }
                 
                 member_flags: Serialization_Flags

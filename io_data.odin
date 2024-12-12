@@ -4,7 +4,7 @@ import "core:fmt"
 import "core:strconv"
 import "core:strings"
 import "core:os"
-import "core:runtime"
+import "base:runtime"
 import "core:reflect"
 import "core:mem"
 

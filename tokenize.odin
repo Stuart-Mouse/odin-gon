@@ -1,6 +1,6 @@
 package gon
 
-import "core:runtime"
+import "base:runtime"
 import "core:reflect"
 import "core:fmt"
 import "core:strings"
@@ -38,6 +38,7 @@ Token_Type :: enum u8 {
 Tokenizer :: struct {
     type       : File_Format,
     next_token : Token,
+    parsing_path: bool,
     
     // not bothering to put specific tokenizers in union for now, 
     // since gon tokenizer is literally just the remaining string and line count
@@ -117,18 +118,20 @@ lex_next_token :: proc(using t: ^Tokenizer) -> (Token, bool) {
             return { .REF_VALUE,    "", line }, true
     }
     
-    // tokens only used in path strings, maybe we have a param to skip these when not parsing for a path
-    if file[0] == '/' {
-        advance(&file)
-        return { .PATH_SPLIT, "", line }, true
+    if parsing_path {
+        // tokens only used in path strings, maybe we have a param to skip these when not parsing for a path
+        if file[0] == '/' {
+            advance(&file)
+            return { .PATH_SPLIT, "", line }, true
+        }
+        
+        // '..' token used in path strings to step up to parent scope
+        if len(file) >= 2 && file[0] == '.' && file[1] == '.' {
+            advance(&file, 2)
+            return { .PATH_PARENT, "", line }, true
+        }
     }
-    
-    // '..' token used in path strings to step up to parent scope
-    if len(file) >= 2 && file[0] == '.' && file[1] == '.' {
-        advance(&file, 2)
-        return { .PATH_PARENT, "", line }, true
-    }
-    
+        
     // quoted string
     if file[0] == '"' || file[0] == '\'' || file[0] == '`' { 
         quote_char := file[0]
@@ -149,11 +152,11 @@ lex_next_token :: proc(using t: ^Tokenizer) -> (Token, bool) {
     }
     
     // unquoted string
-    if is_char_permitted_in_unquoted_string(file[0]) {
+    if is_char_permitted_in_unquoted_string(file[0], parsing_path) {
         string_value := file[0:]
         string_len   := 0
         
-        for is_char_permitted_in_unquoted_string(file[0]) {
+        for is_char_permitted_in_unquoted_string(file[0], parsing_path) {
             string_len += 1
             if !advance(&file) do break
         }
@@ -161,9 +164,8 @@ lex_next_token :: proc(using t: ^Tokenizer) -> (Token, bool) {
         return { .STRING, string_value[:string_len], line }, true
     }
     
-    next_whitespace_char := strings.index_any(file, whitespace_chars)
-    invalid_token_str := file[:]
-    fmt.printfln("Invalid token '%v' encountered.\n", invalid_token_str)
+    char_string := transmute(string) runtime.Raw_Slice { raw_data(file), 1 }
+    fmt.printfln("Unexpected character '%v' encountered.\n", char_string)
     return { .INVALID, "", line }, false
 }
 
@@ -176,13 +178,14 @@ lex_next_token :: proc(using t: ^Tokenizer) -> (Token, bool) {
 // }
 
 // permits alphanumeric characters and dash, underscore, period
-is_char_permitted_in_unquoted_string :: proc(char: u8) -> bool {
+is_char_permitted_in_unquoted_string :: proc(char: u8, parsing_path := false) -> bool {
     return (char >= '0' && char <='9') || 
            (char >= 'a' && char <='z') || 
            (char >= 'A' && char <='Z') || 
             char == '-' || 
             char == '_' || 
-            char == '.'
+            char == '.' || 
+           (char == '/' && !parsing_path)
 }
 
 // bascially wraps our slice operation so that we can handle an error in the case that we run out of characters

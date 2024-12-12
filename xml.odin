@@ -3,7 +3,7 @@ package gon
 import xml "core:encoding/xml"
 import "core:os"
 import "core:fmt"
-import "core:runtime"
+import "base:runtime"
 import "core:strconv"
 import "core:mem"
 import "core:reflect"

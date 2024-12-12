@@ -1,6 +1,6 @@
 package gon
 
-import "core:runtime"
+import "base:runtime"
 import "core:reflect"
 import "core:fmt"
 import "core:strings"
@@ -341,8 +341,7 @@ append_nodes_for_indirect_bindings :: proc(node: ^DOM_Node, allocator := context
     ti := type_info_base(type_info_of(node.data_binding.id))
     #partial switch tiv in ti.variant {
         case Type_Info_Struct: 
-            member_count := len(tiv.names)
-            for i in 0..<member_count {
+            for i in 0..<tiv.field_count {
                 member_type   := tiv.types  [i]
                 member_name   := tiv.names  [i]
                 member_offset := tiv.offsets[i]
@@ -437,4 +436,43 @@ do_sameline_for_type :: proc(type: typeid) -> bool {
     _, type_is_rune  := ti.variant.(runtime.Type_Info_Rune)
     
     return type_is_int || type_is_float || type_is_enum || type_is_rune
+}
+
+
+
+// IMMEDIATE-MODE SERIALIZATION
+
+open_object :: #force_inline proc(sb: ^strings.Builder, name: string) {
+    strings.write_string(sb, to_conformant_string(name, allocator = context.temp_allocator),)
+    strings.write_string(sb, " { ")
+    strings.write_byte(sb, '\n')
+}
+
+close_object :: #force_inline proc(sb: ^strings.Builder) {
+    strings.write_string(sb, "} ")
+    strings.write_byte(sb, '\n')
+}
+
+open_array :: #force_inline proc(sb: ^strings.Builder, name: string) {
+    strings.write_string(sb, to_conformant_string(name, allocator = context.temp_allocator),)
+    strings.write_string(sb, " [ ")
+    strings.write_byte(sb, '\n')
+}
+
+close_array :: #force_inline proc(sb: ^strings.Builder) {
+    strings.write_string(sb, "] ")
+    strings.write_byte(sb, '\n')
+}
+
+write_field :: #force_inline proc(sb: ^strings.Builder, name: string, value: string, raw_value := false) {
+    if value == "" do return
+    
+    strings.write_string(sb, to_conformant_string(name, allocator = context.temp_allocator))
+    strings.write_byte(sb, ' ')
+    
+    value := value
+    if !raw_value do value = to_conformant_string(value, allocator = context.temp_allocator)
+    strings.write_string(sb, value)
+    strings.write_byte(sb, ' ')
+    strings.write_byte(sb, '\n')
 }

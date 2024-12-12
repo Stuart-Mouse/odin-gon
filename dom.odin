@@ -1,7 +1,7 @@
 
 package gon
 
-import "core:runtime"
+import "base:runtime"
 import "core:reflect"
 import "core:fmt"
 import "core:strings"
@@ -95,6 +95,7 @@ debug_print_all_nodes :: proc(node: ^DOM_Node, indent: int = 0) {
 
 // does not delete the passed node or its neighbors, only children
 delete_child_nodes_recursive :: proc(node: ^DOM_Node, allocator := context.allocator) {
+    if node == nil do return
     if node.type == .OBJECT || node.type == .ARRAY {
         child := node.first
         for child != nil {
@@ -110,7 +111,7 @@ find_node_by_path :: proc(node: ^DOM_Node, path: string) -> (^DOM_Node, int) {
     node  := node
     index := 0
     
-    t: Tokenizer = { file = path }
+    t: Tokenizer = { file = path, parsing_path = true }
     consume_token(&t)
     
     for node != nil {
@@ -207,7 +208,7 @@ get_or_add_child_node :: proc(parent: ^DOM_Node, name: string, behavior: Node_In
 append_node_with_path :: proc(parent: ^DOM_Node, path: string, behavior: Node_Insertion_Behaviour = .DEFAULT, prepend := false, allocator := context.allocator) -> ^DOM_Node {
     node := parent
     
-    t: Tokenizer = { file = path }
+    t: Tokenizer = { file = path, parsing_path = true }
     consume_token(&t)
     
     for {
@@ -248,7 +249,7 @@ remove_node :: proc(node: ^DOM_Node, allocator := context.allocator) {
 
 clone_child_nodes_recursive :: proc(dst: ^DOM_Node, src: ^DOM_Node, allocator := context.allocator) -> bool {
     for child := src.first; child != nil; child = child.next {
-        node := append_child_node(dst, false, allocator)
+        node := append_child_node(dst, allocator = allocator)
         if !clone_node_recursive(node, child) do return false
     }
     return true
@@ -395,14 +396,18 @@ parse_file_to_dom :: proc(file: string, format: File_Format = .GON, allocator :=
     Which is nice because that means we save a little bit of memory on that and we don't need the Data_Binding struct anymore.
     We also don't have to split the path into substrings, since we just process it one piece at a time as we insert the binding.
 */
-add_data_binding_to_dom :: proc(using parser: ^DOM_Parser, binding: any, path: string) -> bool {
+add_data_binding_to_dom :: proc(using parser: ^DOM_Parser, binding: any, path: string) -> (ok: bool) {
     node, _ := find_node_by_path(parser.dom_root, path)
-    return add_data_binding_to_node(node, binding)
+    if node == nil || !add_data_binding_to_node(node, binding) {
+        fmt.printfln("Error: unable to create data binding for path '%v'", path)
+    }
+    return 
 }
 
 add_data_bindings_to_dom :: proc(using parser: ^DOM_Parser, bindings: [] struct { binding: any, path: string }) -> bool {
     for b in bindings {
-        if !add_data_binding_to_dom(parser, b.binding, b.path) do return false
+        // if !add_data_binding_to_dom(parser, b.binding, b.path) do return false
+        add_data_binding_to_dom(parser, b.binding, b.path) 
     }
     return true
 }
@@ -546,7 +551,7 @@ validate_node_references :: proc(using parser: ^DOM_Parser) -> bool {
                     for child := ref_node.first; child != nil; child = child.next {
                         dst, _ := find_child_node_by_name(parent, child.name)
                         if dst != nil do continue
-                        dst = append_child_node(parent)
+                        dst = append_child_node(parent, allocator = node_allocator)
                         if !clone_node_recursive(dst, child) do return { .ERROR }
                     }
                     result |= { .REMOVE_NODE }
@@ -604,7 +609,7 @@ process_data_bindings :: proc(using parser: ^DOM_Parser) -> bool {
 
 process_node_binding :: proc(using parser: ^DOM_Parser, node: ^DOM_Node) -> bool {
     if .BINDING_RESOLVED in node.flags do return true
-    
+        
     callback_results: Callback_Results
     for callback in callbacks {
         if callback != nil {
@@ -629,7 +634,6 @@ process_node_binding :: proc(using parser: ^DOM_Parser, node: ^DOM_Node) -> bool
             
         case .FIELD: 
             if node.data_binding == nil do return true
-            
             if binding_io_data, found := &IO_Data_Lookup[node.data_binding.id]; found {
                 using binding_io_data.parse
                 if parse_proc_2 != nil {
@@ -640,7 +644,7 @@ process_node_binding :: proc(using parser: ^DOM_Parser, node: ^DOM_Node) -> bool
                     return true
                 }
             }
-            
+
             return set_value_from_string(node.data_binding, node.value.text)
             
         case .REF:
@@ -688,6 +692,7 @@ construct_dom_from_gon_file :: proc(using parser: ^DOM_Parser) -> bool {
     defer if !success {
         delete_child_nodes_recursive(dom_root)
         free(dom_root, node_allocator)
+        dom_root = nil // prevents a double free in parse_file_to_dom
     }
     
     parent := dom_root
@@ -717,14 +722,14 @@ construct_dom_from_gon_file :: proc(using parser: ^DOM_Parser) -> bool {
                     case .EOF:
                         if parent != dom_root {
                             log("GON parse error: Unexpected %v token \"%v\". on line %v", next_token.type, next_token.text, next_token.line)
-                            return true
+                            return false
                         }
                         break L_Loop
                         
                     case .OBJECT_END:
                         if parent.type != .OBJECT {
                             log("GON parse error: Unexpected %v token \"%v\" on line %v.", next_token.type, next_token.text, next_token.line)
-                            return true
+                            return false
                         }
                         if next_token.line == parent.source_line {
                             parent.flags |= { .SAME_LINE }
@@ -734,7 +739,7 @@ construct_dom_from_gon_file :: proc(using parser: ^DOM_Parser) -> bool {
                         
                     case:
                         log("GON parse error: Unexpected %v token \"%v\" on line %v.", next_token.type, next_token.text, next_token.line)
-                        return true
+                        return false
                 }
             }
         }
@@ -750,7 +755,7 @@ construct_dom_from_gon_file :: proc(using parser: ^DOM_Parser) -> bool {
            next_token.type == .REF_POINTER || 
            next_token.type == .REF_VALUE {
             
-            node := append_child_node(parent)
+            node := append_child_node(parent, allocator = node_allocator)
             node.name  = name
             node.type  = .REF
             node.flags = flags
@@ -803,7 +808,7 @@ construct_dom_from_gon_file :: proc(using parser: ^DOM_Parser) -> bool {
             
             assert(type != .INVALID)
             
-            node := append_child_node(parent)
+            node := append_child_node(parent, allocator = node_allocator)
             node.source_line = source_line
             node.name  = name
             node.type  = type
@@ -859,7 +864,9 @@ add_data_binding_to_node :: proc(node: ^DOM_Node, binding: any) -> bool  {
                     io_data, io_data_found := &IO_Data_Lookup[node.data_binding.id]
                     
                     name_member_name: string
-                    if io_data_found do name_member_name = io_data.name_member.name
+                    if io_data_found {
+                        name_member_name = io_data.name_member.name
+                    }
                     is_name_set := false
                     
                     for child := node.first; child != nil; child = child.next {
@@ -1082,7 +1089,7 @@ add_data_binding_to_node :: proc(node: ^DOM_Node, binding: any) -> bool  {
                     }
                 
                 case runtime.Type_Info_Struct:
-                    if node.count > len(tiv.names) {
+                    if node.count > cast(int) tiv.field_count {
                         fmt.println("Data binding error: array-type struct contains too many elements.")
                         return false
                     }
@@ -1130,6 +1137,11 @@ add_data_binding_to_node :: proc(node: ^DOM_Node, binding: any) -> bool  {
                             elem_ti    = tiv.elem
                 
                         case runtime.Type_Info_Slice:
+                            if !alloc_any_slice(node.data_binding, node.count) {
+                                fmt.println("Data binding error: failed to allocate data for slice.")
+                                return false
+                            }
+                            
                             raw_slice := cast(^runtime.Raw_Slice) node.data_binding.data
                             data       = raw_slice.data
                             elem_count = raw_slice.len
@@ -1152,7 +1164,7 @@ add_data_binding_to_node :: proc(node: ^DOM_Node, binding: any) -> bool  {
                     }
                     
                 case:
-                    fmt.println("Data binding error: mismatched gon/internal type: %v vs %v", node.type, binding.id)
+                    fmt.printfln("Data binding error: mismatched gon/internal type: %v vs %v, at node %v", node.type, binding.id, format_node_path(node))
                     return false
             }
 
