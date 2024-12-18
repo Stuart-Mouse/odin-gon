@@ -442,6 +442,7 @@ process_data_binding :: proc(using ctxt: ^Parser, field: ^SAX_Field) -> bool {
                     return false
             }
             if !set_value_from_string(field.data_binding, field.value) {
+                log("Failed to set value of data binding on field '%v'", field.name)
                 return false
             }
             

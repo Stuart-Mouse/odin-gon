@@ -53,13 +53,13 @@ Parse_Flag :: enum {
 }
 
 Parse_Settings :: struct {
-    flags      : Parse_Flags,
-    parse_proc : proc(^Parser, ^SAX_Field) -> SAX_Return_Code, // TODO: remove when possible
+    flags:          Parse_Flags,
+    parse_proc:     proc(^Parser, ^SAX_Field) -> SAX_Return_Code, // TODO: remove when possible
     
     // remap a data binding (e.g. struct to only one member) 
     // maybe later, we actually expand this to allow user to create the nodes manually
-    bind_proc    : proc(any) -> any,
-    parse_proc_2 : proc(value: any, text: string) -> bool,
+    bind_proc:      proc(any) -> any,
+    parse_proc_2:   proc(value: any, text: string) -> bool,
 }
 
 
@@ -69,17 +69,17 @@ Parse_Settings :: struct {
 IO_Data_Lookup : map[typeid]IO_Data
 
 IO_Data :: struct {
-    parse     : Parse_Settings,
-    serialize : Serialization_Settings,
+    parse:              Parse_Settings,
+    serialize:          Serialization_Settings,
 
     // for structs only
-    name_member    : reflect.Struct_Field,
-    map_key_member : reflect.Struct_Field,
-    member_data    : map[string]IO_Data,
+    name_member:        reflect.Struct_Field,
+    map_key_member:     reflect.Struct_Field,
+    member_data:        map[string]IO_Data,
     
     // for arrays only
     // can be used to index any array using an enum name
-    enum_index_type : typeid,
+    enum_index_type:    typeid,
 }
 
 // Do we really even want or need these wrapper functions? 

@@ -40,30 +40,30 @@ DOM_Node_Ref_Type :: enum u8 { VALUE, POINTER, INDEX }
 // this struct is kinda big
 // maybe we optimize this later, but for now just making it work
 DOM_Node :: struct {
-    parent       : ^DOM_Node, 
-    next         : ^DOM_Node, 
-    prev         : ^DOM_Node, 
+    parent:         ^DOM_Node, 
+    next:           ^DOM_Node, 
+    prev:           ^DOM_Node, 
 
-    source_line  : int,
+    source_line:    int,
 
-    name         : string,
-    type         : Field_Type,
-    flags        : DOM_Node_Flags,
-    data_binding : any,
+    name:           string,
+    type:           Field_Type,
+    flags:          DOM_Node_Flags,
+    data_binding:   any,
     
     using content: struct #raw_union {
         ref: struct {
-            text : string, 
-            node : ^DOM_Node,
-            type : DOM_Node_Ref_Type,
+            text:   string, 
+            node:   ^DOM_Node,
+            type:   DOM_Node_Ref_Type,
         },
         
         value: Token, // probably change back to just string
         
         using children: struct { 
-            first : ^DOM_Node,
-            last  : ^DOM_Node,
-            count : int,
+            first:  ^DOM_Node,
+            last:   ^DOM_Node,
+            count:  int,
         },
     },
 }
@@ -347,11 +347,11 @@ DOM_Parse_Flag  :: enum {
 
 // used to build a DOM from a text file and evaluate data bindings on that DOM
 DOM_Parser :: struct {
-    tokenizer      : Tokenizer,
-    dom_root       : ^DOM_Node,
-    log            : Log_Proc,
-    node_allocator : runtime.Allocator,
-    callbacks      : [dynamic] DOM_Parser_Callback,
+    tokenizer:       Tokenizer,
+    dom_root:        ^DOM_Node,
+    log:             Log_Proc,
+    node_allocator:  runtime.Allocator,
+    callbacks:       [dynamic] DOM_Parser_Callback,
 }
 
 init_dom_parser :: proc(parser: ^DOM_Parser, file: string, format: File_Format = .GON, node_allocator := context.allocator) {
@@ -398,10 +398,15 @@ parse_file_to_dom :: proc(file: string, format: File_Format = .GON, allocator :=
 */
 add_data_binding_to_dom :: proc(using parser: ^DOM_Parser, binding: any, path: string) -> (ok: bool) {
     node, _ := find_node_by_path(parser.dom_root, path)
-    if node == nil || !add_data_binding_to_node(node, binding) {
-        fmt.printfln("Error: unable to create data binding for path '%v'", path)
+    if node == nil {
+        fmt.printfln("Error: unable to create data binding for path '%v'. Path not found.", path)
+        return false
     }
-    return 
+    if !add_data_binding_to_node(node, binding) {
+        fmt.printfln("Error: unable to create data binding for path '%v'", path)
+        return false
+    }
+    return true
 }
 
 add_data_bindings_to_dom :: proc(using parser: ^DOM_Parser, bindings: [] struct { binding: any, path: string }) -> bool {
