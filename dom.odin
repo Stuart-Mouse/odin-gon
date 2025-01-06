@@ -399,11 +399,11 @@ parse_file_to_dom :: proc(file: string, format: File_Format = .GON, allocator :=
 add_data_binding_to_dom :: proc(using parser: ^DOM_Parser, binding: any, path: string) -> (ok: bool) {
     node, _ := find_node_by_path(parser.dom_root, path)
     if node == nil {
-        fmt.printfln("Error: unable to create data binding for path '%v'. Path not found.", path)
+        // log("Error: unable to create data binding for path '%v'. Path not found.", path)
         return false
     }
     if !add_data_binding_to_node(node, binding) {
-        fmt.printfln("Error: unable to create data binding for path '%v'", path)
+        log("Error: unable to create data binding for path '%v'", path)
         return false
     }
     return true
@@ -479,6 +479,7 @@ add_data_bindings_to_dom :: proc(using parser: ^DOM_Parser, bindings: [] struct 
     
 */
 
+// TODO: rewrite this procedure to use a [dynamic] ^DOM_Node as a stack to track references and look for circular dependencies
 validate_node_references :: proc(using parser: ^DOM_Parser) -> bool {
     Result :: bit_set[ enum{ ERROR, COMPLETE, PROGRESS, REMOVE_NODE } ]
 
@@ -839,7 +840,7 @@ add_data_binding_to_node :: proc(node: ^DOM_Node, binding: any) -> bool  {
     }
     
     // check if we need to modify binding based on io data
-    // if binding_io_data, found := *IO_Data_Lookup[binding.id]; found {
+    // if binding_io_data, found := *IO_Data_Lookup[node.data_binding.id]; found {
     //     using binding_io_data.parse
     //     if bind_proc != nil {
     //         binding = bind_proc(binding)
@@ -958,7 +959,7 @@ add_data_binding_to_node :: proc(node: ^DOM_Node, binding: any) -> bool  {
                 case runtime.Type_Info_Dynamic_Array:
                     raw_array := cast(^runtime.Raw_Dynamic_Array) node.data_binding.data
                 
-                    io_data, io_data_found := &IO_Data_Lookup[binding_ti.id]
+                    io_data, io_data_found := &IO_Data_Lookup[node.data_binding.id]
                     if io_data_found && .ARRAY_INDEXED in io_data.parse.flags {
                         node.flags |= { .ARRAY_INDEXED }
                     } else {
@@ -999,7 +1000,7 @@ add_data_binding_to_node :: proc(node: ^DOM_Node, binding: any) -> bool  {
                     
                     
                 case runtime.Type_Info_Array, runtime.Type_Info_Slice, runtime.Type_Info_Enumerated_Array:
-                    io_data, found := &IO_Data_Lookup[binding_ti.id]
+                    io_data, found := &IO_Data_Lookup[node.data_binding.id]
 
                     data       : rawptr
                     elem_count : int
@@ -1128,7 +1129,7 @@ add_data_binding_to_node :: proc(node: ^DOM_Node, binding: any) -> bool  {
                     }
         
                 case runtime.Type_Info_Array, runtime.Type_Info_Slice:
-                    io_data, found := &IO_Data_Lookup[binding_ti.id]
+                    io_data, found := &IO_Data_Lookup[node.data_binding.id]
 
                     data       : rawptr
                     elem_count : int
