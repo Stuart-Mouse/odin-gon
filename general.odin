@@ -500,3 +500,9 @@ unescape_string_into_string_builder :: proc(sb: ^strings.Builder, str: string) -
     }
     return true
 }
+
+advance :: proc(file: ^string, amount := 1) -> bool {
+    amount := min(amount, len(file))
+    file^ = file^[amount:]
+    return len(file) != 0
+}

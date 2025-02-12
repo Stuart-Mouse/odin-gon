@@ -16,10 +16,10 @@ import "core:encoding/json"
     and perhaps this could also do things like manage versioning of structs, etc.
 */
 
-INDENTATION_STRING := "        "
+INDENTATION_STRING := "    "
 
-DOM_Node_Flags :: bit_set[DOM_Node_Flag; u8]
-DOM_Node_Flag  :: enum u8 {
+Node_Flags :: bit_set[Node_Flag; u8]
+Node_Flag  :: enum u8 {
     // parsing flags
     REFERENCES_RESOLVED,
     BINDING_RESOLVED,
@@ -40,30 +40,27 @@ Reference_Type :: enum u8 { VALUE, POINTER, INDEX }
 
 // this struct is kinda big
 // maybe we optimize this later, but for now just making it work
-DOM_Node :: struct {
-    parent:         ^DOM_Node, 
-    next:           ^DOM_Node, 
-    prev:           ^DOM_Node, 
-
-    source_line:    int,
-
+Node :: struct {
+    parent, next, prev: ^Node,
+    
     name:           string,
-    type:           Field_Type,
-    flags:          DOM_Node_Flags,
+    type:           Node_Type,
+    flags:          Node_Flags,
     data_binding:   any,
+    source_line:    int, // TODO: source location, line and char
     
     using content: struct #raw_union {
         ref: struct {
             text:   string, 
-            node:   ^DOM_Node,
+            node:   ^Node,
             type:   Reference_Type,
         },
         
-        value: Token, // probably change back to just string
+        value: string,
         
         children: struct { 
-            first:  ^DOM_Node,
-            last:   ^DOM_Node,
+            first:  ^Node,
+            last:   ^Node,
             count:  int,
         },
     },
@@ -75,7 +72,7 @@ Node_Insertion_Behaviour :: enum {
     UNDERWRITE,     // don't insert node if one with the same name already exists
 }
 
-get_node_index :: proc(node: ^DOM_Node) -> int {
+get_node_index :: proc(node: ^Node) -> int {
     index := 0
     for n := node.prev; n != nil; n = n.prev {
         index += 1
@@ -83,7 +80,7 @@ get_node_index :: proc(node: ^DOM_Node) -> int {
     return index
 }
 
-debug_print_all_nodes :: proc(node: ^DOM_Node, indent: int = 0) {
+debug_print_all_nodes :: proc(node: ^Node, indent: int = 0) {
     for i in 0..<indent do fmt.print(INDENTATION_STRING)
     fmt.println(node.name)
 
@@ -95,7 +92,7 @@ debug_print_all_nodes :: proc(node: ^DOM_Node, indent: int = 0) {
 }
 
 // does not delete the passed node or its neighbors, only children
-delete_child_nodes_recursive :: proc(node: ^DOM_Node, allocator := context.allocator) {
+delete_child_nodes_recursive :: proc(node: ^Node, allocator := context.allocator) {
     if node == nil do return
     if node.type == .OBJECT || node.type == .ARRAY {
         child := node.children.first
@@ -108,7 +105,7 @@ delete_child_nodes_recursive :: proc(node: ^DOM_Node, allocator := context.alloc
     }
 }
 
-find_node_by_path :: proc(node: ^DOM_Node, path: string) -> (^DOM_Node, int) {
+find_node_by_path :: proc(node: ^Node, path: string) -> (^Node, int) {
     if path == "" do return node, get_node_index(node)
     node  := node
     path  := path
@@ -128,7 +125,7 @@ find_node_by_path :: proc(node: ^DOM_Node, path: string) -> (^DOM_Node, int) {
 }
 
 // will return nil if not found
-find_child_node_by_name :: proc(parent: ^DOM_Node, name: string) -> (^DOM_Node, int) {
+find_child_node_by_name :: proc(parent: ^Node, name: string) -> (^Node, int) {
     node := parent.children.first
     index := 0
     for node != nil {
@@ -139,7 +136,7 @@ find_child_node_by_name :: proc(parent: ^DOM_Node, name: string) -> (^DOM_Node, 
     return node, index
 }
 
-append_data_node :: proc(parent: ^DOM_Node, path: string, data_binding: any, prepend := false, allocator := context.allocator) ->  ^DOM_Node {    
+append_data_node :: proc(parent: ^Node, path: string, data_binding: any, prepend := false, allocator := context.allocator) ->  ^Node {    
     node := append_node_with_path(parent, path, prepend = prepend, allocator = allocator)
     if node == nil do return node
     
@@ -156,8 +153,8 @@ append_data_node :: proc(parent: ^DOM_Node, path: string, data_binding: any, pre
 
 // does the bare minimum to append a node, not even giving it a name
 // after the node is appended, caller should initialize it
-append_child_node :: proc(parent: ^DOM_Node, prepend := false, allocator := context.allocator) ->  ^DOM_Node {
-    node, err := new(DOM_Node, allocator)
+append_child_node :: proc(parent: ^Node, prepend := false, allocator := context.allocator) ->  ^Node {
+    node, err := new(Node, allocator)
     if err != nil do return nil // don't want to pass down the allocator error atm, maybe do this later
     
     node.parent = parent
@@ -189,8 +186,8 @@ append_child_node :: proc(parent: ^DOM_Node, prepend := false, allocator := cont
 }
 
 // may be a little bit odd, but if you want tell if a node was overwritten or not, check if type == .INVALID. if so, then the node was either created or overwritten
-get_or_add_child_node :: proc(parent: ^DOM_Node, name: string, behavior: Node_Insertion_Behaviour = .DEFAULT, prepend := false, allocator := context.allocator) ->  ^DOM_Node {
-    node: ^DOM_Node
+get_or_add_child_node :: proc(parent: ^Node, name: string, behavior: Node_Insertion_Behaviour = .DEFAULT, prepend := false, allocator := context.allocator) ->  ^Node {
+    node: ^Node
     
     if behavior != .DEFAULT {
         node, _ = find_child_node_by_name(parent, name)
@@ -207,7 +204,7 @@ get_or_add_child_node :: proc(parent: ^DOM_Node, name: string, behavior: Node_In
     return node
 }
 
-append_node_with_path :: proc(parent: ^DOM_Node, path: string, behavior: Node_Insertion_Behaviour = .DEFAULT, prepend := false, allocator := context.allocator) -> ^DOM_Node {
+append_node_with_path :: proc(parent: ^Node, path: string, behavior: Node_Insertion_Behaviour = .DEFAULT, prepend := false, allocator := context.allocator) -> ^Node {
     node := parent
     path := path
     next: string
@@ -235,7 +232,7 @@ append_node_with_path :: proc(parent: ^DOM_Node, path: string, behavior: Node_In
     return nil
 }
 
-remove_node :: proc(node: ^DOM_Node, allocator := context.allocator) {
+remove_node :: proc(node: ^Node, allocator := context.allocator) {
     node.parent.children.count -= 1
     if node.next != nil do node.next.prev = node.prev
     if node.prev != nil do node.prev.next = node.next
@@ -245,7 +242,7 @@ remove_node :: proc(node: ^DOM_Node, allocator := context.allocator) {
 }
 
 
-clone_child_nodes_recursive :: proc(dst: ^DOM_Node, src: ^DOM_Node, allocator := context.allocator) -> bool {
+clone_child_nodes_recursive :: proc(dst: ^Node, src: ^Node, allocator := context.allocator) -> bool {
     for child := src.children.first; child != nil; child = child.next {
         node := append_child_node(dst, allocator = allocator)
         if !clone_node_recursive(node, child) do return false
@@ -253,7 +250,7 @@ clone_child_nodes_recursive :: proc(dst: ^DOM_Node, src: ^DOM_Node, allocator :=
     return true
 }
 
-clone_node_recursive :: proc(dst: ^DOM_Node, src: ^DOM_Node, allocator := context.allocator) -> bool {    
+clone_node_recursive :: proc(dst: ^Node, src: ^Node, allocator := context.allocator) -> bool {    
     if dst.type == .OBJECT {
         delete_child_nodes_recursive(dst)
     }
@@ -273,7 +270,7 @@ clone_node_recursive :: proc(dst: ^DOM_Node, src: ^DOM_Node, allocator := contex
                 fmt.printfln("ERROR: cloned a value ref node @ %v", format_node_path(dst))
             }
         case .FIELD:
-            dst.value.text = src.value.text
+            dst.value = src.value
         case .INVALID:
             return false
     }
@@ -281,8 +278,8 @@ clone_node_recursive :: proc(dst: ^DOM_Node, src: ^DOM_Node, allocator := contex
     return true
 }
 
-format_node_path :: proc(node: ^DOM_Node) -> string {
-    recurse :: proc(builder: ^strings.Builder, node: ^DOM_Node) {
+format_node_path :: proc(node: ^Node) -> string {
+    recurse :: proc(builder: ^strings.Builder, node: ^Node) {
         if node.parent != nil {
             recurse(builder, node.parent)
             strings.write_byte(builder, '/')
@@ -318,22 +315,17 @@ format_node_path :: proc(node: ^DOM_Node) -> string {
     
 */
 
-DOM_Parser_Callback :: proc(^DOM_Node) -> Callback_Results
-
-DOM_Parse_Flags :: bit_set[DOM_Parse_Flag]
-DOM_Parse_Flag  :: enum {
-    SKIP_PATHS_WITHOUT_BINDINGS,
-}
+Parser_Callback :: proc(^Node) -> Callback_Results
 
 // used to build a DOM from a text file and evaluate data bindings on that DOM
-DOM_Parser :: struct {
-    tokenizer:       Tokenizer,
-    dom_root:        ^DOM_Node,
+Parser :: struct {
+    tokenizer:       Lexer,
+    dom_root:        ^Node,
     node_allocator:  runtime.Allocator,
-    callbacks:       [dynamic] DOM_Parser_Callback,
+    callbacks:       [dynamic] Parser_Callback,
 }
 
-init_dom_parser :: proc(parser: ^DOM_Parser, file: string, format: File_Format = .GON, node_allocator := context.allocator) {
+init_dom_parser :: proc(parser: ^Parser, file: string, format: File_Format = .GON, node_allocator := context.allocator) {
     parser.node_allocator = node_allocator
     
     parser.tokenizer.type = format
@@ -348,7 +340,7 @@ init_dom_parser :: proc(parser: ^DOM_Parser, file: string, format: File_Format =
     consume_token(&parser.tokenizer) // get the first token when we init, we always pull one token ahead of the one we return
 }
 
-deinit_dom_parser :: proc(using parser: ^DOM_Parser) {
+deinit_dom_parser :: proc(using parser: ^Parser) {
     delete_child_nodes_recursive(dom_root, node_allocator)
     free(dom_root, node_allocator)
     dom_root = nil
@@ -357,7 +349,7 @@ deinit_dom_parser :: proc(using parser: ^DOM_Parser) {
 
 // creates a dom parser with the given parameters, intializes it, and constructs the dom from the given file
 // after calling this, you can just add your data bindings and then process them
-parse_file_to_dom :: proc(file: string, format: File_Format = .GON, allocator := context.allocator) -> (parser: DOM_Parser, ok: bool) {
+parse_file_to_dom :: proc(file: string, format: File_Format = .GON, allocator := context.allocator) -> (parser: Parser, ok: bool) {
     init_dom_parser(&parser, file, format, allocator)
     defer if !ok do deinit_dom_parser(&parser)
     
@@ -372,7 +364,7 @@ parse_file_to_dom :: proc(file: string, format: File_Format = .GON, allocator :=
     Which is nice because that means we save a little bit of memory on that and we don't need the Data_Binding struct anymore.
     We also don't have to split the path into substrings, since we just process it one piece at a time as we insert the binding.
 */
-add_data_binding_to_dom :: proc(using parser: ^DOM_Parser, binding: any, path: string) -> (ok: bool) {
+add_data_binding_to_dom :: proc(using parser: ^Parser, binding: any, path: string) -> (ok: bool) {
     node, _ := find_node_by_path(parser.dom_root, path)
     if node == nil {
         // log.logf(.Error, "Error: unable to create data binding for path '%v'. Path not found.", path)
@@ -385,7 +377,7 @@ add_data_binding_to_dom :: proc(using parser: ^DOM_Parser, binding: any, path: s
     return true
 }
 
-add_data_bindings_to_dom :: proc(using parser: ^DOM_Parser, bindings: [] struct { binding: any, path: string }) -> bool {
+add_data_bindings_to_dom :: proc(using parser: ^Parser, bindings: [] struct { binding: any, path: string }) -> bool {
     for b in bindings {
         // if !add_data_binding_to_dom(parser, b.binding, b.path) do return false
         add_data_binding_to_dom(parser, b.binding, b.path) 
@@ -455,11 +447,11 @@ add_data_bindings_to_dom :: proc(using parser: ^DOM_Parser, bindings: [] struct 
     
 */
 
-// TODO: rewrite this procedure to use a [dynamic] ^DOM_Node as a stack to track references and look for circular dependencies
-validate_node_references :: proc(using parser: ^DOM_Parser) -> bool {
+// TODO: rewrite this procedure to use a [dynamic] ^Node as a stack to track references and look for circular dependencies
+validate_node_references :: proc(using parser: ^Parser) -> bool {
     Result :: bit_set[ enum{ ERROR, COMPLETE, PROGRESS, REMOVE_NODE } ]
 
-    recurse :: proc(using parser: ^DOM_Parser, node: ^DOM_Node) -> Result {
+    recurse :: proc(using parser: ^Parser, node: ^Node) -> Result {
         if .REFERENCES_RESOLVED in node.flags do return { .COMPLETE }
         
         switch node.type {
@@ -585,11 +577,11 @@ validate_node_references :: proc(using parser: ^DOM_Parser) -> bool {
     return true
 }
 
-process_data_bindings :: proc(using parser: ^DOM_Parser) -> bool {
+process_data_bindings :: proc(using parser: ^Parser) -> bool {
     return process_node_binding(parser, dom_root)
 }
 
-process_node_binding :: proc(using parser: ^DOM_Parser, node: ^DOM_Node) -> bool {
+process_node_binding :: proc(using parser: ^Parser, node: ^Node) -> bool {
     if .BINDING_RESOLVED in node.flags do return true
         
     callback_results: Callback_Results
@@ -618,8 +610,8 @@ process_node_binding :: proc(using parser: ^DOM_Parser, node: ^DOM_Node) -> bool
             if node.data_binding == nil do return true
             if binding_io_data, found := &IO_Data_Lookup[node.data_binding.id]; found {
                 using binding_io_data.parse
-                if parse_proc_2 != nil {
-                    if !parse_proc_2(node.data_binding, node.value.text) {
+                if parse_proc != nil {
+                    if !parse_proc(node.data_binding, node.value) {
                         fmt.println("Error, parse_proc() failed.")
                         return false
                     }
@@ -627,7 +619,7 @@ process_node_binding :: proc(using parser: ^DOM_Parser, node: ^DOM_Node) -> bool
                 }
             }
 
-            return set_value_from_string(node.data_binding, node.value.text)
+            return set_value_from_string(node.data_binding, node.value)
             
         case .REF:
             assert(node.ref.node != nil, "ref node was nil")
@@ -662,11 +654,11 @@ process_node_binding :: proc(using parser: ^DOM_Parser, node: ^DOM_Node) -> bool
     return true
 }
 
-construct_dom_from_gon_file :: proc(using parser: ^DOM_Parser) -> bool {
+construct_dom_from_gon_file :: proc(using parser: ^Parser) -> bool {
     next_token : Token
     ok         : bool
     
-    dom_root      = new(DOM_Node, node_allocator)
+    dom_root      = new(Node, node_allocator)
     dom_root.name = "root"
     dom_root.type = .OBJECT
     
@@ -680,8 +672,8 @@ construct_dom_from_gon_file :: proc(using parser: ^DOM_Parser) -> bool {
     parent := dom_root
     L_Loop: for parent != nil {
         name, text  : string
-        type        : Field_Type
-        flags       : DOM_Node_Flags
+        type        : Node_Type
+        flags       : Node_Flags
         source_line : int
         
         // field value ref without name inside an object will create an unnamed field with the same data binding as the parent object
@@ -798,7 +790,7 @@ construct_dom_from_gon_file :: proc(using parser: ^DOM_Parser) -> bool {
             if node.type == .OBJECT || node.type == .ARRAY {
                 parent = node
             } else {
-                node.value.text = text
+                node.value = text
             }
         }
     }
@@ -807,7 +799,7 @@ construct_dom_from_gon_file :: proc(using parser: ^DOM_Parser) -> bool {
     return true
 }
 
-add_data_binding_to_node :: proc(node: ^DOM_Node, binding: any) -> bool  {
+add_data_binding_to_node :: proc(node: ^Node, binding: any) -> bool  {
     if node == nil || binding.data == nil do return true
     
     if node.data_binding.data != nil {

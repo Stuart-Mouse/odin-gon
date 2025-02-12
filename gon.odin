@@ -9,7 +9,7 @@ import "core:reflect"
 import "core:mem"
 import "core:log"
 
-Field_Type :: enum u8 { 
+Node_Type :: enum u8 { 
     INVALID = 0, 
     FIELD   = 1,
     OBJECT  = 2, 
@@ -17,81 +17,6 @@ Field_Type :: enum u8 {
     REF     = 4,
 }
 
-get_next_token :: proc(ctxt: ^Parser) -> (Token_Type, string) {
-    switch ctxt.tokenizer.type {
-      case .GON:
-        return get_next_token_gon(&ctxt.tokenizer.gon.file)
-      case .JSON:
-        return get_next_token_json(&ctxt.tokenizer.json)
-    }
-    return .INVALID, ""
-}
-
-// only here for sake of sax
-advance :: proc(file: ^string, amount := 1) -> bool {
-    amount := min(amount, len(file))
-    file^ = file^[amount:]
-    return len(file) != 0
-}
-
-// mutates the passed string, advancing it to the position after the returned token
-get_next_token_gon :: proc(file: ^string) -> (Token_Type, string) {
-    if len(file^) <= 0 do return .EOF, ""
-    if !skip_whitespace_and_comments(file) do return .EOF, ""
-    if len(file^) <= 0 do return .EOF, ""
-  
-    switch file^[0] {
-      case '{':
-        advance(file)
-        return .OBJECT_BEGIN, ""
-      case '}':
-        advance(file)
-        return .OBJECT_END, ""
-      case '[':
-        advance(file)
-        return .ARRAY_BEGIN, ""
-      case ']':
-        advance(file)
-        return .ARRAY_END, ""
-    }
-  
-    // next token is a string token
-    string_value := file^
-  
-    // scan for end of string in quotation marks
-    if file^[0] == '\"' {
-        if !advance(file) do return .INVALID, ""
-        string_value = string_value[1:]
-        string_len := 0
-    
-        for file^[0] != '\"' {
-            adv : int = 1
-            if file^[0] == '\\' do adv = 2
-            if !advance(file, adv) do return .INVALID, ""
-            string_len += adv
-        }
-    
-        if !advance(file) do return .INVALID, ""
-    
-        return .STRING, string_value[:string_len]
-    }
-  
-    // scan for end of bare string
-    if !is_reserved_char(file^[0]) {
-        string_len := 0
-        for !is_reserved_char(file^[0]) && !is_whitespace(file^[0]) {
-            if !advance(file) {
-                return .EOF, ""
-            }
-            string_len += 1
-        }
-        return .STRING, string_value[:string_len]
-    }
-  
-    // there's probably some funky character in the file...?
-    fmt.println("Something funky happened.\n")
-    return .INVALID, ""
-}
 
 is_reserved_char :: proc(char: u8) -> bool {
     return char == '#' || char == '{' || char == '}' || char == '[' || char == ']'
