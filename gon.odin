@@ -15,36 +15,14 @@ Field_Type :: enum u8 {
     OBJECT  = 2, 
     ARRAY   = 3,
     REF     = 4,
-    // maybe add ATTRIBUTE type? would be implicitly convertible to FIELD during parsing, could add formatting options specific to 
-    // parsing in attributes is more straightforward. serializing them out to XML is where things get less nice.
 }
-
-// print_all_tokens :: proc(file: string) {
-//     file := file
-//     next_token_type : Token_Type
-//     next_token      : string
-//     fmt.println("Tokens in file:")
-//     for {
-//         next_token_type, next_token = get_next_token(&ctxt)
-//         #partial switch next_token_type {
-//             case .INVALID:      fmt.println("INV"); return
-//             case .EOF:          fmt.println("EOF"); return
-//             case .OBJECT_BEGIN: fmt.println("{")
-//             case .OBJECT_END:   fmt.println("}")
-//             case .ARRAY_BEGIN:  fmt.println("[")
-//             case .ARRAY_END:    fmt.println("]")
-//             case: fmt.println(next_token)
-//         }
-//     }
-//     fmt.println()
-// }
 
 get_next_token :: proc(ctxt: ^Parser) -> (Token_Type, string) {
     switch ctxt.tokenizer.type {
-        case .GON:
-            return get_next_token_gon(&ctxt.tokenizer.gon.file)
-        case .JSON:
-            return get_next_token_json(&ctxt.tokenizer.json)
+      case .GON:
+        return get_next_token_gon(&ctxt.tokenizer.gon.file)
+      case .JSON:
+        return get_next_token_json(&ctxt.tokenizer.json)
     }
     return .INVALID, ""
 }
@@ -63,18 +41,18 @@ get_next_token_gon :: proc(file: ^string) -> (Token_Type, string) {
     if len(file^) <= 0 do return .EOF, ""
   
     switch file^[0] {
-        case '{':
-            advance(file)
-            return .OBJECT_BEGIN, ""
-        case '}':
-            advance(file)
-            return .OBJECT_END, ""
-        case '[':
-            advance(file)
-            return .ARRAY_BEGIN, ""
-        case ']':
-            advance(file)
-            return .ARRAY_END, ""
+      case '{':
+        advance(file)
+        return .OBJECT_BEGIN, ""
+      case '}':
+        advance(file)
+        return .OBJECT_END, ""
+      case '[':
+        advance(file)
+        return .ARRAY_BEGIN, ""
+      case ']':
+        advance(file)
+        return .ARRAY_END, ""
     }
   
     // next token is a string token
@@ -129,8 +107,15 @@ to_conformant_string :: proc(s: string, force_quotes := false, allocator := cont
 
     sb := strings.builder_make(allocator)
     defer strings.builder_destroy(&sb)
-  
-    write_quotes := force_quotes || (len(s) == 0) || strings.contains_any(s, whitespace_and_reserved_chars)
+    
+    write_quotes := force_quotes || (len(s) == 0)
+    if !write_quotes {
+        for c in transmute([]u8)s {
+            if !is_char_permitted_in_unquoted_string(c) {
+                write_quotes = true
+            }
+        }
+    }
     
     if write_quotes do strings.write_byte(&sb, '\"')
   
@@ -270,23 +255,23 @@ serialize_any :: proc(
         
         // disambiguate array/slice/dynamic
         #partial switch tiv in tiv {
-            case Type_Info_Array:
-                data       = value.data
-                elem_count = tiv.count
-                elem_ti    = tiv.elem
-    
-            case Type_Info_Slice:
-                raw_slice := cast(^runtime.Raw_Slice) value.data
-                data       = raw_slice.data
-                elem_count = raw_slice.len
-                elem_ti    = tiv.elem
-  
-            case Type_Info_Dynamic_Array:
-                raw_dynamic_array := cast(^runtime.Raw_Dynamic_Array) value.data
-                data       = raw_dynamic_array.data
-                elem_count = raw_dynamic_array.len
-                elem_ti    = tiv.elem
-                if elem_count == 0 do return // skip serializing empty dynamic arrays
+          case Type_Info_Array:
+            data       = value.data
+            elem_count = tiv.count
+            elem_ti    = tiv.elem
+
+          case Type_Info_Slice:
+            raw_slice := cast(^runtime.Raw_Slice) value.data
+            data       = raw_slice.data
+            elem_count = raw_slice.len
+            elem_ti    = tiv.elem
+
+          case Type_Info_Dynamic_Array:
+            raw_dynamic_array := cast(^runtime.Raw_Dynamic_Array) value.data
+            data       = raw_dynamic_array.data
+            elem_count = raw_dynamic_array.len
+            elem_ti    = tiv.elem
+            if elem_count == 0 do return // skip serializing empty dynamic arrays
         }
 
         // skip serializing if all bytes of array data are 0
@@ -324,11 +309,11 @@ serialize_any :: proc(
         // maybe strings should print on individual lines?
         on_one_line := false
         #partial switch elem_tiv in runtime.type_info_base(elem_ti).variant {
-            case Type_Info_Array, Type_Info_Slice, Type_Info_Dynamic_Array, Type_Info_Struct:
-                break
-                
-            case: // everything else
-                on_one_line = true
+          case Type_Info_Array, Type_Info_Slice, Type_Info_Dynamic_Array, Type_Info_Struct:
+            break
+            
+          case: // everything else
+            on_one_line = true
         }
         on_one_line |= .ON_ONE_LINE in flags
         
