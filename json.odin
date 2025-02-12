@@ -10,7 +10,7 @@ get_next_token_json :: proc(json_tokenizer: ^json.Tokenizer) -> (Token_Type, str
         json_token, err := json.get_token(json_tokenizer)
         if err != nil && err != .EOF {
             fmt.println("json tokenizer error:", err)
-            return .INVALID, ""
+            return .ERROR, ""
         }
         
         gon_token_type: Token_Type
@@ -21,7 +21,7 @@ get_next_token_json :: proc(json_tokenizer: ^json.Tokenizer) -> (Token_Type, str
                 gon_token_type = .EOF
                 
             case .Invalid:
-                gon_token_type = .INVALID
+                gon_token_type = .ERROR
                 
             case .Null, .False, .True, .Infinity, .NaN, .Ident, .Integer, .Float, .String:
                 gon_token_type = .STRING
@@ -51,12 +51,12 @@ get_next_token_json :: proc(json_tokenizer: ^json.Tokenizer) -> (Token_Type, str
 }
 
 
-lex_next_token_json :: proc(json_tokenizer: ^json.Tokenizer) -> (Token, bool) {
+lex_next_token_json :: proc(json_tokenizer: ^json.Tokenizer) -> Token {
     loop: for {
         json_token, err := json.get_token(json_tokenizer)
         if err != nil && err != .EOF {
             fmt.println("json tokenizer error:", err)
-            return { .INVALID, "", 0 }, false
+            return { .ERROR, "", {} }
         }
         
         gon_token_type: Token_Type
@@ -67,7 +67,7 @@ lex_next_token_json :: proc(json_tokenizer: ^json.Tokenizer) -> (Token, bool) {
                 gon_token_type = .EOF
                 
             case .Invalid:
-                gon_token_type = .INVALID
+                gon_token_type = .ERROR
                 
             case .Null, .False, .True, .Infinity, .NaN, .Ident, .Integer, .Float, .String:
                 gon_token_type = .STRING
@@ -92,7 +92,7 @@ lex_next_token_json :: proc(json_tokenizer: ^json.Tokenizer) -> (Token, bool) {
                 continue loop
         }
         
-        return { gon_token_type, gon_token, 0 }, true
+        return { gon_token_type, gon_token, {} }
     }
 }
 

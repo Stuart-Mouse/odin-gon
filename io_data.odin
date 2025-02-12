@@ -8,6 +8,10 @@ import "base:runtime"
 import "core:reflect"
 import "core:mem"
 
+/*
+    IO Data is essentially an extension of type info that pertains specifically to how you want GON to parse and serialize your data.
+    
+*/
 
 Serialization_Flags :: bit_set[Serialization_Flag]
 Serialization_Flag :: enum {
@@ -37,9 +41,9 @@ Serialization_Flag :: enum {
 }
 
 Serialization_Settings :: struct {
-    flags : Serialization_Flags,
+    flags: Serialization_Flags,
     // TODO: replace with an interface for user to insert nodes manually
-    to_string_proc : proc(any) -> (string, string, bool),
+    to_string_proc: proc(any) -> (string, string, bool),
 }
 
 Parse_Flags :: bit_set[Parse_Flag]
@@ -65,7 +69,7 @@ Parse_Settings :: struct {
 /*
     Add parsing/serialization settings data for all of your data types here at startup.
 */
-IO_Data_Lookup : map[typeid]IO_Data
+IO_Data_Lookup: map[typeid]IO_Data
 
 IO_Data :: struct {
     parse:              Parse_Settings,
@@ -106,17 +110,6 @@ free_io_data :: proc() {
     }
     delete(IO_Data_Lookup)
 }
-
-// io_data_set_name_member :: proc(type: typeid, member_name: string) -> bool {
-//     io_data, found := &IO_Data_Lookup[type]
-//     if !found {
-//         IO_Data_Lookup[type] = {}
-//         io_data, found = &IO_Data_Lookup[type]
-//         if !found do return false
-//     }
-//     io_data.name_member = reflect.struct_field_by_name(type, member_name)
-//     return true
-// }
 
 Callback_Results     :: bit_set[Callback_Result_Flag]
 Callback_Result_Flag :: enum {

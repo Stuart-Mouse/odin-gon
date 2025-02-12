@@ -11,12 +11,6 @@ import "core:math"
 import "core:log"
 import "core:encoding/json"
 
-/*
-    After getting some of the basic stuff working for the DOM thing, I may be able to use it to generate parsing procedures for binary data as well.
-    and perhaps this could also do things like manage versioning of structs, etc.
-*/
-
-INDENTATION_STRING := "    "
 
 Node_Flags :: bit_set[Node_Flag; u8]
 Node_Flag  :: enum u8 {
@@ -38,6 +32,14 @@ Node_Flag  :: enum u8 {
 
 Reference_Type :: enum u8 { VALUE, POINTER, INDEX }
 
+Node_Type :: enum u8 { 
+    INVALID = 0, 
+    FIELD   = 1,
+    OBJECT  = 2, 
+    ARRAY   = 3,
+    REF     = 4,
+}
+
 // this struct is kinda big
 // maybe we optimize this later, but for now just making it work
 Node :: struct {
@@ -47,7 +49,7 @@ Node :: struct {
     type:           Node_Type,
     flags:          Node_Flags,
     data_binding:   any,
-    source_line:    int, // TODO: source location, line and char
+    location:       Source_Location, 
     
     using content: struct #raw_union {
         ref: struct {
@@ -71,6 +73,9 @@ Node_Insertion_Behaviour :: enum {
     OVERWRITE,      // overwrite existing nodes with the same name
     UNDERWRITE,     // don't insert node if one with the same name already exists
 }
+
+
+// DOM OPERATIONS
 
 get_node_index :: proc(node: ^Node) -> int {
     index := 0
@@ -241,7 +246,6 @@ remove_node :: proc(node: ^Node, allocator := context.allocator) {
     free(node, allocator)
 }
 
-
 clone_child_nodes_recursive :: proc(dst: ^Node, src: ^Node, allocator := context.allocator) -> bool {
     for child := src.children.first; child != nil; child = child.next {
         node := append_child_node(dst, allocator = allocator)
@@ -262,17 +266,17 @@ clone_node_recursive :: proc(dst: ^Node, src: ^Node, allocator := context.alloca
     dst.content      = {}
 
     switch src.type {
-        case .OBJECT, .ARRAY:
-            return clone_child_nodes_recursive(dst, src, allocator)
-        case .REF:
-            dst.ref = src.ref
-            if dst.ref.type == .VALUE {
-                fmt.printfln("ERROR: cloned a value ref node @ %v", format_node_path(dst))
-            }
-        case .FIELD:
-            dst.value = src.value
-        case .INVALID:
-            return false
+      case .OBJECT, .ARRAY:
+        return clone_child_nodes_recursive(dst, src, allocator)
+      case .REF:
+        dst.ref = src.ref
+        if dst.ref.type == .VALUE {
+            fmt.printfln("ERROR: cloned a value ref node @ %v", format_node_path(dst))
+        }
+      case .FIELD:
+        dst.value = src.value
+      case .INVALID:
+        return false
     }
     
     return true
@@ -294,76 +298,12 @@ format_node_path :: proc(node: ^Node) -> string {
 }
 
 
-/*
-    SERIALIZATION NOTES
 
-    It seems like we really may not *need* to create nodes for all indirect bindings when serializing.
-    The only reason we need to create the nodes is so that we can reorder elements, and we may attach some formatting flags to the nodes but those flags are presumably available also by checking the io data for the data binding. 
-    
-    not sure if I like the separation of determining the field type and creating indirect data bindings
-    the reason they are separate now is because of how I am creating the nodes with the type before creating indirect bindings
-    
-    I think though, that we can append the node, then resolve the type and create indirect bindings in a single procedure. 
-        And that seems like it may be a better idea since both of those operations require similar information.
-        Plus, we could more succinctly rebind data as necessary, like in treating []u8 types as strings.
-    
-    
-    SIDE NOTE:
-    
-    we will have to insert a special condition when serializing a node to handle the custom formatting that's required for a bit set
-    likewise for parsing a bit set from a dom also.
-    
-*/
 
-Parser_Callback :: proc(^Node) -> Callback_Results
 
-// used to build a DOM from a text file and evaluate data bindings on that DOM
-Parser :: struct {
-    tokenizer:       Lexer,
-    dom_root:        ^Node,
-    node_allocator:  runtime.Allocator,
-    callbacks:       [dynamic] Parser_Callback,
-}
 
-init_dom_parser :: proc(parser: ^Parser, file: string, format: File_Format = .GON, node_allocator := context.allocator) {
-    parser.node_allocator = node_allocator
-    
-    parser.tokenizer.type = format
-    switch format {
-        case .GON:
-            parser.tokenizer.file = file
-            parser.tokenizer.line = 1
-        case .JSON:
-            parser.tokenizer.json_tokenizer = json.make_tokenizer(file)
-    }
-        
-    consume_token(&parser.tokenizer) // get the first token when we init, we always pull one token ahead of the one we return
-}
+// DATA BINDINGS
 
-deinit_dom_parser :: proc(using parser: ^Parser) {
-    delete_child_nodes_recursive(dom_root, node_allocator)
-    free(dom_root, node_allocator)
-    dom_root = nil
-    delete(callbacks)
-}
-
-// creates a dom parser with the given parameters, intializes it, and constructs the dom from the given file
-// after calling this, you can just add your data bindings and then process them
-parse_file_to_dom :: proc(file: string, format: File_Format = .GON, allocator := context.allocator) -> (parser: Parser, ok: bool) {
-    init_dom_parser(&parser, file, format, allocator)
-    defer if !ok do deinit_dom_parser(&parser)
-    
-    if !construct_dom_from_gon_file(&parser) do return {}, false
-    if !validate_node_references   (&parser) do return {}, false
-    
-    return parser, true
-}
-
-/*
-    We are no longer appending to a dynamic array of data bindings, instead just inserting those data bindings immediately when this is called by the user.
-    Which is nice because that means we save a little bit of memory on that and we don't need the Data_Binding struct anymore.
-    We also don't have to split the path into substrings, since we just process it one piece at a time as we insert the binding.
-*/
 add_data_binding_to_dom :: proc(using parser: ^Parser, binding: any, path: string) -> (ok: bool) {
     node, _ := find_node_by_path(parser.dom_root, path)
     if node == nil {
@@ -385,69 +325,6 @@ add_data_bindings_to_dom :: proc(using parser: ^Parser, bindings: [] struct { bi
     return true
 }
 
-/*
-    dom parser features
-        parsing
-            + plain old data, default formatting
-            + indexed arrays
-            + arrays of named objects
-            + map types
-                + support key types other than string
-                + store key value to map key member
-            + enumerated arrays
-            + indexing normal arrays with enums?
-                + just add enum typeid in io_data for array ezpz
-            + field refs
-                + traverse nodes by relative field path
-                + get index
-                + get binding value / or fallback to string value
-                + get binding pointer
-            - callbacks
-                + ability to remap data binding
-                + ability to add custom parsing in a callback and skip normal bindings
-                - consider and improve
-            - expression evaluation with lead sheets integration
-            
-        serialization
-            + plain old data, default formatting
-            + sameline flag with somewhat intelligent defaults
-                + store source line number on node
-                    + use this to set sameline flag on parsed nodes
-            - indexed arrays
-            - callbacks / fully custom formatting
-
-    
-    Broad overview of dom parsing process:
-        construct dom from file
-        validate field refs
-        insert data bindings onto nodes
-        final walk over dom
-            run callbacks
-            process data bindings
-            
-
-    
-    TODO: 
-    use a tracking allocator and ensure that we aren't leaking memory. This is pretty important.
-    Also, probably refactor all code that allocates nodes and ensure that they are allocated and freed using the proper allocator
-    
-    
-    
-    Future Optimizations:
-    
-    we will probably be able to stop using a doubly-linked structure for nodes, instead using a singly-linked list for child nodes
-        we still need to be able to traverse up the tree in order to resolve relative field references though, so we can't remove the need for *parent
-    
-    use real arena for nodes instead of polluting temp storage
-        use indexes instead of pointers
-        introduce better node naviagtion procs
-            something like get_next(node, 3) could offer conditional chaining of get_next()
-    
-    
-    
-*/
-
-// TODO: rewrite this procedure to use a [dynamic] ^Node as a stack to track references and look for circular dependencies
 validate_node_references :: proc(using parser: ^Parser) -> bool {
     Result :: bit_set[ enum{ ERROR, COMPLETE, PROGRESS, REMOVE_NODE } ]
 
@@ -455,93 +332,93 @@ validate_node_references :: proc(using parser: ^Parser) -> bool {
         if .REFERENCES_RESOLVED in node.flags do return { .COMPLETE }
         
         switch node.type {
-            case .FIELD:
+          case .FIELD:
+            node.flags |= { .REFERENCES_RESOLVED }
+            return { .PROGRESS, .COMPLETE }
+    
+          case .OBJECT, .ARRAY:
+                result: Result = { .COMPLETE }
+                child := node.children.first; 
+                for child != nil {
+                    next_child   := child.next
+                    child_result := recurse(parser, child)
+                    if .ERROR       in child_result do return { .ERROR }
+                    if .REMOVE_NODE in child_result do remove_node(child, node_allocator)
+                    result |=  child_result & { .PROGRESS }
+                    result &= (child_result & { .COMPLETE }) | ~{ .COMPLETE }
+                    child = next_child
+                }
+                if .COMPLETE in result {
+                    node.flags |= { .REFERENCES_RESOLVED }
+                }
+                return result
+            
+          case .REF:
+            path := node.ref.text
+            if path == "" {
+                log.logf(.Error, "Empty reference on node '%v'.", format_node_path(node))
+                return { .ERROR }
+            }
+            
+            search_from_node := node.parent
+            if path[0] == '/' {
+                path = path[1:]
+                search_from_node = parser.dom_root
+            }
+            ref_node, _ := find_node_by_path(search_from_node, path)
+            
+            if ref_node == nil {
+                // TODO: find a way to print failed node path only when full pass makes no progress
+                // maybe we collect warnings in some array and only print on error
+                // would want to enumerate error types and store node, then format and print later
+                log.logf(.Error, "WARNING: Cannot resolve ref from %v to %v", format_node_path(node), node.ref.text)
+                return { }
+            }
+            node.ref.node = ref_node
+            
+            // pointer and index refs can be passed along and handled later
+            if node.ref.type != .VALUE { 
                 node.flags |= { .REFERENCES_RESOLVED }
                 return { .PROGRESS, .COMPLETE }
-        
-            case .OBJECT, .ARRAY:
-                    result: Result = { .COMPLETE }
-                    child := node.children.first; 
-                    for child != nil {
-                        next_child   := child.next
-                        child_result := recurse(parser, child)
-                        if .ERROR       in child_result do return { .ERROR }
-                        if .REMOVE_NODE in child_result do remove_node(child, node_allocator)
-                        result |=  child_result & { .PROGRESS }
-                        result &= (child_result & { .COMPLETE }) | ~{ .COMPLETE }
-                        child = next_child
-                    }
-                    if .COMPLETE in result {
-                        node.flags |= { .REFERENCES_RESOLVED }
-                    }
-                    return result
-                
-            case .REF:
-                path := node.ref.text
-                if path == "" {
-                    log.logf(.Error, "Empty reference on node '%v'.", format_node_path(node))
-                    return { .ERROR }
-                }
-                
-                search_from_node := node.parent
-                if path[0] == '/' {
-                    path = path[1:]
-                    search_from_node = parser.dom_root
-                }
-                ref_node, _ := find_node_by_path(search_from_node, path)
-                
-                if ref_node == nil {
-                    // TODO: find a way to print failed node path only when full pass makes no progress
-                    // maybe we collect warnings in some array and only print on error
-                    // would want to enumerate error types and store node, then format and print later
-                    log.logf(.Error, "WARNING: Cannot resolve ref from %v to %v", format_node_path(node), node.ref.text)
+            }
+            
+            // value ref to value ref cannot be resolved yet
+            if node.ref.node.type == .REF && node.ref.node.ref.type == .VALUE {
+                log.logf(.Error, "WARNING: Cannot resolve value ref to value ref: %v", format_node_path(node))
+                return { }
+            }
+            
+            result := Result { .PROGRESS, .COMPLETE }
+            
+            if .BIND_PARENT in node.flags {
+                assert(ref_node.type == .OBJECT, "ref node with bind parent flag was not pointing to an object.")
+            
+                // we can't copy these nodes until they are all resolved, otherwise we get issues
+                if .REFERENCES_RESOLVED not_in ref_node.flags {
                     return { }
                 }
-                node.ref.node = ref_node
-                
-                // pointer and index refs can be passed along and handled later
-                if node.ref.type != .VALUE { 
-                    node.flags |= { .REFERENCES_RESOLVED }
-                    return { .PROGRESS, .COMPLETE }
+            
+                parent := node.parent
+                for child := ref_node.children.first; child != nil; child = child.next {
+                    dst, _ := find_child_node_by_name(parent, child.name)
+                    if dst != nil do continue
+                    dst = append_child_node(parent, allocator = node_allocator)
+                    if !clone_node_recursive(dst, child) do return { .ERROR }
                 }
-                
-                // value ref to value ref cannot be resolved yet
-                if node.ref.node.type == .REF && node.ref.node.ref.type == .VALUE {
-                    log.logf(.Error, "WARNING: Cannot resolve value ref to value ref: %v", format_node_path(node))
-                    return { }
-                }
-                
-                result := Result { .PROGRESS, .COMPLETE }
-                
-                if .BIND_PARENT in node.flags {
-                    assert(ref_node.type == .OBJECT, "ref node with bind parent flag was not pointing to an object.")
-                
-                    // we can't copy these nodes until they are all resolved, otherwise we get issues
-                    if .REFERENCES_RESOLVED not_in ref_node.flags {
-                        return { }
-                    }
-                
-                    parent := node.parent
-                    for child := ref_node.children.first; child != nil; child = child.next {
-                        dst, _ := find_child_node_by_name(parent, child.name)
-                        if dst != nil do continue
-                        dst = append_child_node(parent, allocator = node_allocator)
-                        if !clone_node_recursive(dst, child) do return { .ERROR }
-                    }
-                    result |= { .REMOVE_NODE }
-                }
-                else {
-                    name := node.name
-                    if !clone_node_recursive(node, ref_node) do return { .ERROR }
-                    node.name = name
-                }
-                
-                node.flags |= { .REFERENCES_RESOLVED }
-                return result
-                
-            case .INVALID:
-                log.logf(.Error, "Invalid node type in validate_node_references().")
-                return { .ERROR }
+                result |= { .REMOVE_NODE }
+            }
+            else {
+                name := node.name
+                if !clone_node_recursive(node, ref_node) do return { .ERROR }
+                node.name = name
+            }
+            
+            node.flags |= { .REFERENCES_RESOLVED }
+            return result
+            
+          case .INVALID:
+            log.logf(.Error, "Invalid node type in validate_node_references().")
+            return { .ERROR }
         }
         
         return { .ERROR }
@@ -598,204 +475,58 @@ process_node_binding :: proc(using parser: ^Parser, node: ^Node) -> bool {
     }
     
     #partial switch node.type {
-        case .OBJECT, .ARRAY:
-            for child := node.children.first; child != nil; child = child.next {
-                if !process_node_binding(parser, child) {
+      case .OBJECT, .ARRAY:
+        for child := node.children.first; child != nil; child = child.next {
+            if !process_node_binding(parser, child) {
+                return false
+            }
+        }
+        return true
+        
+      case .FIELD: 
+        if node.data_binding == nil do return true
+        if binding_io_data, found := &IO_Data_Lookup[node.data_binding.id]; found {
+            using binding_io_data.parse
+            if parse_proc != nil {
+                if !parse_proc(node.data_binding, node.value) {
+                    fmt.println("Error, parse_proc() failed.")
                     return false
                 }
+                return true
             }
+        }
+        return set_value_from_string(node.data_binding, node.value)
+        
+      case .REF:
+        assert(node.ref.node != nil, "ref node was nil")
+        #partial switch node.ref.type {
+          case .INDEX:
+            return node.data_binding == nil || dynamic_int_cast(node.data_binding, get_node_index(node.ref.node))
+            
+          case .POINTER:
+            if node.data_binding == nil do return true
+            if node.ref.node.data_binding == nil {
+                // TODO: have some option for this to be an error
+                log.logf(.Error, "Warning: no data binding on pointer ref node '%v'.", format_node_path(node))
+                return true
+            }
+            
+            ref_ti_base     := reflect.type_info_base(type_info_of(node.ref.node.data_binding.id))
+            binding_ti_base := reflect.type_info_base(type_info_of(node.data_binding.id).variant.(runtime.Type_Info_Pointer).elem)
+            if ref_ti_base != binding_ti_base {
+                fmt.printfln("pointer type mismatch %v vs %v", ref_ti_base.id, binding_ti_base.id)
+                return false
+            }
+            (cast(^rawptr) node.data_binding.data)^ = node.ref.node.data_binding.data
             return true
             
-        case .FIELD: 
-            if node.data_binding == nil do return true
-            if binding_io_data, found := &IO_Data_Lookup[node.data_binding.id]; found {
-                using binding_io_data.parse
-                if parse_proc != nil {
-                    if !parse_proc(node.data_binding, node.value) {
-                        fmt.println("Error, parse_proc() failed.")
-                        return false
-                    }
-                    return true
-                }
-            }
-
-            return set_value_from_string(node.data_binding, node.value)
-            
-        case .REF:
-            assert(node.ref.node != nil, "ref node was nil")
-            #partial switch node.ref.type {
-                case .INDEX:
-                    return node.data_binding == nil || dynamic_int_cast(node.data_binding, get_node_index(node.ref.node))
-                    
-                case .POINTER:
-                    if node.data_binding == nil do return true
-                    if node.ref.node.data_binding == nil {
-                        // TODO: have some option for this to be an error
-                        log.logf(.Error, "Warning: no data binding on pointer ref node '%v'.", format_node_path(node))
-                        return true
-                    }
-                    
-                    ref_ti_base     := reflect.type_info_base(type_info_of(node.ref.node.data_binding.id))
-                    binding_ti_base := reflect.type_info_base(type_info_of(node.data_binding.id).variant.(runtime.Type_Info_Pointer).elem)
-                    if ref_ti_base != binding_ti_base {
-                        fmt.printfln("pointer type mismatch %v vs %v", ref_ti_base.id, binding_ti_base.id)
-                        return false
-                    }
-                    (cast(^rawptr) node.data_binding.data)^ = node.ref.node.data_binding.data
-                    return true
-                    
-                case:
-                    fmt.printfln("ERROR: got a ref of type %v in process_node_binding.", node.ref.type)
-                    return false
-            }
-            
-    }
-    
-    return true
-}
-
-construct_dom_from_gon_file :: proc(using parser: ^Parser) -> bool {
-    next_token : Token
-    ok         : bool
-    
-    dom_root      = new(Node, node_allocator)
-    dom_root.name = "root"
-    dom_root.type = .OBJECT
-    
-    success := false
-    defer if !success {
-        delete_child_nodes_recursive(dom_root)
-        free(dom_root, node_allocator)
-        dom_root = nil // prevents a double free in parse_file_to_dom
-    }
-    
-    parent := dom_root
-    L_Loop: for parent != nil {
-        name, text  : string
-        type        : Node_Type
-        flags       : Node_Flags
-        source_line : int
-        
-        // field value ref without name inside an object will create an unnamed field with the same data binding as the parent object
-        if parent.type == .OBJECT && peek_token(&tokenizer).type == .REF_VALUE {
-            flags |= { .BIND_PARENT }
-        } else {
-            // read field name
-            if parent.type != .ARRAY {
-                next_token, ok = get_token(&tokenizer)
-                if !ok {
-                    err_token := peek_token(&tokenizer)
-                    log.logf(.Error, "GON tokenization error: Unexpected %v token \"%v\" on line %v.", err_token.type, err_token.text, err_token.line)
-                    return false
-                }
-                #partial switch next_token.type {
-                    case .STRING: 
-                        name = next_token.text
-                        source_line = next_token.line
-                        
-                    case .EOF:
-                        if parent != dom_root {
-                            log.logf(.Error, "GON parse error: Unexpected %v token \"%v\". on line %v", next_token.type, next_token.text, next_token.line)
-                            return false
-                        }
-                        break L_Loop
-                        
-                    case .OBJECT_END:
-                        if parent.type != .OBJECT {
-                            log.logf(.Error, "GON parse error: Unexpected %v token \"%v\" on line %v.", next_token.type, next_token.text, next_token.line)
-                            return false
-                        }
-                        if next_token.line == parent.source_line {
-                            parent.flags |= { .SAME_LINE }
-                        }
-                        parent = parent.parent
-                        continue
-                        
-                    case:
-                        log.logf(.Error, "GON parse error: Unexpected %v token \"%v\" on line %v.", next_token.type, next_token.text, next_token.line)
-                        return false
-                }
-            }
-        }
-        
-        next_token, ok = get_token(&tokenizer)
-        if !ok {
-            err_token := peek_token(&tokenizer)
-            log.logf(.Error, "GON tokenization error: Unexpected %v token \"%v\" on line %v.", err_token.type, err_token.text, err_token.line)
+          case:
+            fmt.printfln("ERROR: got a ref of type %v in process_node_binding.", node.ref.type)
             return false
         }
-        
-        if next_token.type == .REF_INDEX   || 
-           next_token.type == .REF_POINTER || 
-           next_token.type == .REF_VALUE {
             
-            node := append_child_node(parent, allocator = node_allocator)
-            node.name  = name
-            node.type  = .REF
-            node.flags = flags
-            
-            #partial switch next_token.type {
-                case .REF_INDEX   : node.ref.type = .INDEX
-                case .REF_POINTER : node.ref.type = .POINTER
-                case .REF_VALUE   : node.ref.type = .VALUE
-            }
-            
-            next_token, ok = get_token(&tokenizer)
-            if !ok {
-                err_token := peek_token(&tokenizer)
-                log.logf(.Error, "GON tokenization error: Unexpected %v token \"%v\" on line %v.", err_token.type, err_token.text, err_token.line)
-                return false
-            }
-            if next_token.type != .STRING {
-                log.logf(.Error, "GON parsing error: Field ref path must be a valid string value.")
-                return false
-            } 
-            node.ref.text = next_token.text
-        }
-        else {
-            // read field value
-            #partial switch next_token.type {
-                case .STRING: 
-                    type = .FIELD
-                    text = next_token.text
-                    if source_line <= 0 {
-                        source_line = next_token.line
-                    }
-                case .OBJECT_BEGIN: 
-                    type = .OBJECT
-                case .ARRAY_BEGIN: 
-                    type = .ARRAY
-                case .ARRAY_END:
-                    if parent.type != .ARRAY {
-                        log.logf(.Error, "GON parse error: Unexpected %v token \"%v\". on line %v", next_token.type, next_token.text, next_token.line)
-                        return false
-                    }
-                    if next_token.line == parent.source_line {
-                        parent.flags |= { .SAME_LINE }
-                    }
-                    parent = parent.parent
-                    continue
-                case:
-                    fmt.printfln("GON parse error: Unexpected %v token \"%v\". on line %v", next_token.type, next_token.text, next_token.line)
-                    return false
-            }
-            
-            assert(type != .INVALID)
-            
-            node := append_child_node(parent, allocator = node_allocator)
-            node.source_line = source_line
-            node.name  = name
-            node.type  = type
-            node.flags = flags
-            if node.type == .OBJECT || node.type == .ARRAY {
-                parent = node
-            } else {
-                node.value = text
-            }
-        }
     }
     
-    success = true
     return true
 }
 

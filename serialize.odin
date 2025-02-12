@@ -28,6 +28,8 @@ Serializer :: struct {
     allocator:      runtime.Allocator, // only used for allocating dom nodes, not used for string builder atm. may store a separate allocator for that
 }
 
+INDENTATION_STRING :: "    "
+
 
 // INTERFACE PROCEDURES
 
@@ -474,4 +476,432 @@ write_field :: #force_inline proc(sb: ^strings.Builder, name: string, value: str
     strings.write_string(sb, value)
     strings.write_byte(sb, ' ')
     strings.write_byte(sb, '\n')
+}
+
+
+
+
+
+is_reserved_char :: proc(char: u8) -> bool {
+    return char == '#' || char == '{' || char == '}' || char == '[' || char == ']'
+}
+
+// only " and \ need to be escaped
+is_escaped_char :: proc(char: u8) -> bool {
+    return char == '\\' || char == '\"'
+}
+
+to_conformant_string :: proc(s: string, force_quotes := false, allocator := context.allocator) -> string {
+    if s == "" do return strings.clone("\"\"", allocator)
+
+    sb := strings.builder_make(allocator)
+    defer strings.builder_destroy(&sb)
+    
+    write_quotes := force_quotes || (len(s) == 0)
+    if !write_quotes {
+        for c in transmute([]u8)s {
+            if !is_char_permitted_in_unquoted_string(c) {
+                write_quotes = true
+            }
+        }
+    }
+    
+    if write_quotes do strings.write_byte(&sb, '\"')
+  
+    for c in (transmute([]u8)s) {
+        if c == 0 do break
+        if is_escaped_char(c) {
+            strings.write_byte(&sb, '\\')
+        }
+        strings.write_byte(&sb, c)
+    }
+  
+    if write_quotes do strings.write_byte(&sb, '\"')
+  
+    return strings.to_string(sb)
+}
+
+type_has_custom_serialization_proc :: proc(type: typeid) -> bool {
+    type_io_data, found := IO_Data_Lookup[type]
+    if !found do return false
+    return type_io_data.serialize.to_string_proc != nil
+}
+
+/*
+    Trying to just get a quick and dirty solution done, so there are some things done very inefficiently.
+    For example, the print_to_builder proc was just inteded to allow me to more easily port my Jai code even though the temp allocations are kinda dumb.
+*/
+serialize_any :: proc(
+    sb:       ^strings.Builder, 
+    name:     string, 
+    value:    any, 
+    indent:   int    = 0, 
+    delim:    string = "",
+    flags:    Serialization_Flags = {},
+) {
+    using runtime
+    
+    if value.data == nil do return
+
+    ti := type_info_base(type_info_of(value.id))
+    
+    flags := flags
+    type_io_data, _ := IO_Data_Lookup[value.id] // don't currently need to check if actually found. This is likely to change
+    
+    flags |= type_io_data.serialize.flags
+    
+    if .SKIP_IF_EMPTY in flags && all_bytes_are_zero(value) do return // skip serializing zero'd data
+    
+    if type_io_data.serialize.to_string_proc != nil {
+        for i in 0..<indent do strings.write_string(sb, " ")
+    
+        // TODO: name this variables better
+        // Custom serialization proc can return both name and value strings
+        x_name, x_value, ok := type_io_data.serialize.to_string_proc(value)
+        if !ok do return
+
+        if name != "" {
+            if x_name == "" do x_name = name // use default name if none provided by the custom serialization proc
+            strings.write_string(sb, 
+                to_conformant_string(x_name, allocator = context.temp_allocator),
+            )
+            strings.write_string(sb, " ");
+        }
+        
+        fmt.sbprintf(sb, "%v", to_conformant_string(x_value, force_quotes = true))
+        
+        delim := delim != "" ? delim : "\n" 
+        strings.write_string(sb, delim)
+        
+        return
+    }
+
+    #partial switch tiv in ti.variant {
+      case Type_Info_Struct: 
+        for i in 0..<indent do strings.write_string(sb, " ");
+        if name != "" {
+            strings.write_string(sb, 
+                to_conformant_string(name, allocator = context.temp_allocator),
+            )
+            strings.write_string(sb, " ");
+        }
+        
+        as_array    := .AS_ARRAY    in flags
+        on_one_line := .ON_ONE_LINE in flags
+        
+        strings.write_byte(sb, as_array    ? '[' : '{' )
+        strings.write_byte(sb, on_one_line ? ' ' : '\n')
+        
+        member_indent := on_one_line ? 0 : indent + 2
+        
+        for i in 0..<tiv.field_count {
+            type   := tiv.types  [i]
+            name   := tiv.names  [i]
+            offset := tiv.offsets[i]
+            
+            member_any := any {
+                data = mem.ptr_offset(cast(^byte)value.data, offset),
+                id   = type.id,
+            }
+            
+            // We have to figure out the delim on every iteration so that we don't write
+            //   a comma after the last element when fields are all on one line.
+            // member_delim := type_io_data.serialize.member_delim
+            // if member_delim == "" {
+                // I apologize for the nested ternary
+                member_delim := on_one_line ? ((i == tiv.field_count-1) ? " " : ", ") : "\n"
+            // }
+            
+            member_flags: Serialization_Flags
+            if .SKIP_ELEMS_IF_EMPTY in flags {
+                member_flags |= { .SKIP_IF_EMPTY }
+            }
+            
+            member_name := as_array ? "" : name
+            
+            serialize_any(sb, 
+                name   = member_name, 
+                value  = member_any, 
+                indent = member_indent, 
+                delim  = member_delim, 
+                flags  = member_flags,
+            )
+        }
+        
+        if !on_one_line do for i in 0..<indent do strings.write_string(sb, " ");
+        
+        strings.write_byte(sb, as_array ? ']' : '}' )
+        
+        delim := delim != "" ? delim : "\n" 
+        strings.write_string(sb, delim);
+        
+        return
+
+      case Type_Info_Array, Type_Info_Slice, Type_Info_Dynamic_Array: 
+        data:       rawptr
+        elem_count: int
+        elem_ti:    ^Type_Info
+        
+        // disambiguate array/slice/dynamic
+        #partial switch tiv in tiv {
+          case Type_Info_Array:
+            data       = value.data
+            elem_count = tiv.count
+            elem_ti    = tiv.elem
+
+          case Type_Info_Slice:
+            raw_slice := cast(^runtime.Raw_Slice) value.data
+            data       = raw_slice.data
+            elem_count = raw_slice.len
+            elem_ti    = tiv.elem
+
+          case Type_Info_Dynamic_Array:
+            raw_dynamic_array := cast(^runtime.Raw_Dynamic_Array) value.data
+            data       = raw_dynamic_array.data
+            elem_count = raw_dynamic_array.len
+            elem_ti    = tiv.elem
+            if elem_count == 0 do return // skip serializing empty dynamic arrays
+        }
+
+        // skip serializing if all bytes of array data are 0
+        if .SKIP_IF_EMPTY in flags && 
+           all_bytes_are_zero(data, elem_count * elem_ti.size) {
+            return
+        }
+
+        for i in 0..<indent do strings.write_string(sb, " ");
+        if name != "" {
+            strings.write_string(sb, 
+                to_conformant_string(name, allocator = context.temp_allocator),
+            )
+            strings.write_string(sb, " ");
+        }
+
+        // serialize as a string if the element type is u8
+        if elem_ti.size == 1 {
+            str := transmute(string) runtime.Raw_String {
+                data = auto_cast data,
+                len  = elem_count,
+            }
+            strings.write_string(sb, 
+                to_conformant_string(str, force_quotes = true, allocator = context.temp_allocator),
+            )
+            strings.write_byte(sb, '\n');
+            return 
+        }
+        
+        as_indexed  := .ARRAY_INDEXED in flags 
+        as_object   := .AS_OBJECT     in flags 
+        
+        // by default, print structs and arrays on individual lines, all else print on one line
+        // perhaps we should also consider the number of elements?
+        // maybe strings should print on individual lines?
+        on_one_line := false
+        #partial switch elem_tiv in runtime.type_info_base(elem_ti).variant {
+          case Type_Info_Array, Type_Info_Slice, Type_Info_Dynamic_Array, Type_Info_Struct:
+            break
+            
+          case: // everything else
+            on_one_line = true
+        }
+        on_one_line |= .ON_ONE_LINE in flags
+        
+        elem_indent := on_one_line ? 0 : indent + 2
+        elem_delim  : string // declared outside the loop so that we can use it afterwards
+        
+        strings.write_byte(sb, 
+            as_indexed || as_object ? '{' : '['
+        )
+        strings.write_byte(sb, on_one_line ? ' ' : '\n')
+        
+        for i in 0..<elem_count {
+            elem_any := any {
+                id   = elem_ti.id,
+                data = mem.ptr_offset(cast(^byte)data, elem_ti.size * i),
+            }
+            
+            // We have to figure out the delim on every frame so that we don't write
+            //   a comma after the last element when fields are all on one line.
+            // elem_delim = type_io_data.serialize.member_delim
+            // if elem_delim == "" {
+                // I apologize for the nested ternary
+                elem_delim = on_one_line ? ((i == elem_count-1) ? " " : ", ") : "\n"
+            // }
+            
+            elem_name: string
+            if as_indexed do elem_name = fmt.tprint(i)
+            if as_object {
+                // TODO: implement normal case to get struct name member
+                if type_has_custom_serialization_proc(elem_any.id) {
+                    elem_name = " "
+                }
+            }
+            
+            elem_flags: Serialization_Flags
+            if .SKIP_ELEMS_IF_EMPTY in flags {
+                elem_flags |= { .SKIP_IF_EMPTY }
+            }
+            
+            serialize_any(sb, 
+                name   = elem_name, 
+                value  = elem_any, 
+                indent = elem_indent, 
+                delim  = elem_delim, 
+                flags  = elem_flags, 
+            )
+        }
+        
+        if !on_one_line do for i in 0..<indent do strings.write_string(sb, " ");
+        
+        strings.write_byte(sb, 
+            as_indexed || as_object ? '}' : ']'
+        )
+        
+        delim := delim != "" ? delim : "\n" 
+        strings.write_string(sb, delim);
+            
+        return
+    
+      case Type_Info_String: 
+        str: string
+        if tiv.is_cstring {
+            str = string((cast(^cstring)value.data)^)
+        } else {
+            str = (cast(^string)value.data)^
+        }
+        
+        for i in 0..<indent do strings.write_string(sb, " ")
+        if name != "" {
+            strings.write_string(sb, 
+                to_conformant_string(name, allocator = context.temp_allocator),
+            )
+            strings.write_byte(sb, ' ')
+        }
+        
+        strings.write_string(sb, 
+            to_conformant_string(str, force_quotes = true, allocator = context.temp_allocator),
+        )
+        
+        delim := delim != "" ? delim : "\n" 
+        strings.write_string(sb, delim);
+        
+        return
+
+      case Type_Info_Bit_Set: 
+        for i in 0..<indent do strings.write_string(sb, " ");
+        if name != "" {
+            strings.write_string(sb, 
+                to_conformant_string(name, allocator = context.temp_allocator),
+            )
+            strings.write_string(sb, " ");
+        }
+
+        u64_value: u64
+        dynamic_int_cast(u64_value, value)
+
+        bytes := transmute([8]byte) u64_value
+        strings.write_string(sb, "[ ")
+        #partial switch elem_ti in type_info_base(type_info_of(tiv.elem.id)).variant {
+          case Type_Info_Enum:
+            for value, i in elem_ti.values {
+                if i64(value) >= tiv.lower && i64(value) <= tiv.upper {
+                    bit := value - auto_cast tiv.lower
+                    if bool(bytes[bit / 8] & u8(1 << u64(bit % 8))) {
+                        strings.write_string(sb, elem_ti.names[i])
+                        strings.write_string(sb, " ")
+                    }
+                }
+            }
+          case Type_Info_Integer:
+            for i in tiv.lower..=tiv.upper {
+                bit := i - tiv.lower
+                if bool(bytes[bit / 8] & u8(1 << u64(bit % 8))) {
+                    strings.write_int(sb, int(i))
+                    strings.write_string(sb, " ")
+                }
+            }
+          case Type_Info_Rune:
+            for i in tiv.lower..=tiv.upper {
+                bit := i - tiv.lower
+                if bool(bytes[bit / 8] & u8(1 << u64(bit % 8))) {
+                    strings.write_rune(sb, rune(i))
+                    strings.write_string(sb, " ")
+                }
+            }
+          case:
+            fmt.println("Unsupported bit set element type", elem_ti)
+            return
+        }
+        strings.write_string(sb, "]")
+        
+        delim := delim != "" ? delim : "\n" 
+        strings.write_string(sb, delim);
+        
+        return
+
+      case Type_Info_Map:
+        raw_map := transmute(^Raw_Map) value.data
+        #partial switch ti_key in runtime.type_info_base(tiv.key).variant {
+          case Type_Info_String:
+            for i in 0..<indent do strings.write_string(sb, " ");
+            if name != "" {
+                strings.write_string(sb, 
+                    to_conformant_string(name, allocator = context.temp_allocator),
+                )
+                strings.write_string(sb, " ");
+            }
+            
+            strings.write_string(sb, "{\n")
+            m := (^mem.Raw_Map)(value.data)
+            
+            if m != nil {
+                if tiv.map_info == nil {
+                    return
+                }
+                map_cap := uintptr(runtime.map_cap(m^))
+                ks, vs, hs, _, _ := runtime.map_kvh_data_dynamic(m^, tiv.map_info)
+                j := 0
+                for bucket_index in 0..<map_cap {
+                    runtime.map_hash_is_valid(hs[bucket_index]) or_continue         
+                    key   := runtime.map_cell_index_dynamic(ks, tiv.map_info.ks, bucket_index)
+                    value := runtime.map_cell_index_dynamic(vs, tiv.map_info.vs, bucket_index)
+          
+                    elem_flags := flags
+                    serialize_any(sb, (cast(^string)key)^, any{rawptr(value), tiv.value.id}, indent = indent + 2, flags = elem_flags)
+                }
+            }
+                        
+            for i in 0..<indent do strings.write_string(sb, " ")
+            strings.write_string(sb, "}")
+            
+            delim := delim != "" ? delim : "\n" 
+            strings.write_string(sb, delim);
+            
+            return
+                  
+          case: 
+            fmt.printf("Unable to serialize type: %v\nCurrently, only maps with string keys are supported.", ti)
+            return
+        }
+        
+      case Type_Info_Integer, Type_Info_Float, Type_Info_Enum, Type_Info_Boolean: 
+        for i in 0..<indent do strings.write_string(sb, " ");
+        
+        if name != "" {
+            strings.write_string(sb, 
+                to_conformant_string(name, allocator = context.temp_allocator),
+            )
+            strings.write_string(sb, " ");
+        }
+        
+        fmt.sbprintf(sb, "%v", value);
+        
+        delim := delim != "" ? delim : "\n" 
+        strings.write_string(sb, delim);
+        
+        return
+    }    
+    
+    fmt.println("Unable to serialize type", ti)
+    return
 }

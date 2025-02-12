@@ -61,14 +61,14 @@ _test_set_value_from_string :: proc() -> bool {
     success := true
 
     test_integers :: proc() -> bool {
-        t_u8  : u8
-        t_i8  : i8
-        t_u16 : u16
-        t_i16 : i16
-        t_u32 : u32
-        t_i32 : i32
-        t_u64 : u64
-        t_i64 : i64
+        t_u8:  u8
+        t_i8:  i8
+        t_u16: u16
+        t_i16: i16
+        t_u32: u32
+        t_i32: i32
+        t_u64: u64
+        t_i64: i64
         
         success := true
         
