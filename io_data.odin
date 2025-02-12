@@ -95,6 +95,19 @@ register_io_data :: proc(type: typeid, io_data: IO_Data) {
     IO_Data_Lookup[type] = io_data
 }
 
+free_io_data :: proc() {
+    free_individual :: proc(io: ^IO_Data) {
+        for _, &m in io.member_data {
+            free_individual(&m)
+            delete(io.member_data)
+        }
+    }
+    for _, &io in IO_Data_Lookup {
+        free_individual(&io)
+    }
+    delete(IO_Data_Lookup)
+}
+
 // io_data_set_name_member :: proc(type: typeid, member_name: string) -> bool {
 //     io_data, found := &IO_Data_Lookup[type]
 //     if !found {

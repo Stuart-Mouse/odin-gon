@@ -61,26 +61,26 @@ set_value_from_string :: proc(value: any, text: string, no_copy := false, loc :=
 
             elem_ti := type_info_base(tiv.elem)
             #partial switch elem_tiv in elem_ti.variant {
-                case Type_Info_Integer:
-                    bit := cast(i64) strconv.atoi(text)
-                    if bit >= tiv.lower && bit <= tiv.upper {
-                        bit -= tiv.lower
+              case Type_Info_Integer:
+                bit := cast(i64) strconv.atoi(text)
+                if bit >= tiv.lower && bit <= tiv.upper {
+                    bit -= tiv.lower
+                    bytes[bit / 8] |= u8(1 << u64(bit % 8))
+                }
+              case Type_Info_Rune:
+                rune_value, _ := utf8.decode_rune_in_string(text)
+                bit := cast(i64) rune_value
+                if bit >= tiv.lower && bit <= tiv.upper {
+                    bit -= tiv.lower
+                    bytes[bit / 8] |= u8(1 << u64(bit % 8))
+                }
+              case Type_Info_Enum:
+                for name, index in elem_tiv.names {
+                    if index >= int(tiv.lower) && index <= int(tiv.upper) && name == text {
+                        bit := int(elem_tiv.values[index]) - int(tiv.lower)
                         bytes[bit / 8] |= u8(1 << u64(bit % 8))
                     }
-                case Type_Info_Rune:
-                    rune_value, _ := utf8.decode_rune_in_string(text)
-                    bit := cast(i64) rune_value
-                    if bit >= tiv.lower && bit <= tiv.upper {
-                        bit -= tiv.lower
-                        bytes[bit / 8] |= u8(1 << u64(bit % 8))
-                    }
-                case Type_Info_Enum:
-                    for name, index in elem_tiv.names {
-                        if index >= int(tiv.lower) && index <= int(tiv.upper) && name == text {
-                            bit := int(elem_tiv.values[index]) - int(tiv.lower)
-                            bytes[bit / 8] |= u8(1 << u64(bit % 8))
-                        }
-                    }
+                }
             }
 
             dynamic_int_cast(value, i64_value)
@@ -105,10 +105,10 @@ set_value_from_string :: proc(value: any, text: string, no_copy := false, loc :=
         case Type_Info_Boolean:
             if text[0] == 't' || text[0] == 'T' {
                 switch ti.size {
-                    case 1: (cast(^b8 )value.data)^ = true
-                    case 2: (cast(^b16)value.data)^ = true
-                    case 4: (cast(^b32)value.data)^ = true
-                    case 8: (cast(^b64)value.data)^ = true
+                  case 1: (cast(^b8 )value.data)^ = true
+                  case 2: (cast(^b16)value.data)^ = true
+                  case 4: (cast(^b32)value.data)^ = true
+                  case 8: (cast(^b64)value.data)^ = true
                 }
             }
             return true

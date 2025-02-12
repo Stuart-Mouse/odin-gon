@@ -16,17 +16,15 @@ import "core:encoding/json"
 // DATA SEGMENT
 
 Serializer :: struct {
-    builder       : strings.Builder,
-    format        : File_Format,
-    indent        : int,
+    builder:        strings.Builder,
+    format:         File_Format,
+    indent:         int,
     
-    dom_root      : ^DOM_Node,
-    do_free_nodes : bool,
+    dom_root:       ^DOM_Node,
+    do_free_nodes:  bool,
     
     // event_handler : SAX_Event_Handler,
-    log           : Log_Proc,
-    
-    allocator     : runtime.Allocator, // only used for allocating dom nodes, not used for string builder atm. may store a separate allocator for that
+    allocator:      runtime.Allocator, // only used for allocating dom nodes, not used for string builder atm. may store a separate allocator for that
 }
 
 
@@ -64,8 +62,8 @@ serialize :: proc(using serializer: ^Serializer) -> bool {
     
     serialize_proc: proc(using serializer: ^Serializer, node: ^DOM_Node) -> bool 
     switch serializer.format {
-        case .GON  : serialize_proc = serialize_dom_nodes_to_gon
-        case .JSON : serialize_proc = serialize_dom_nodes_to_json
+      case .GON:  serialize_proc = serialize_dom_nodes_to_gon
+      case .JSON: serialize_proc = serialize_dom_nodes_to_json
     }
     
     // manually iterate over root node's children
@@ -111,7 +109,7 @@ serialize_dom_nodes_to_gon :: proc(using serializer: ^Serializer, node: ^DOM_Nod
 
     if node.parent != nil {
         in_array       = node.parent.type == .ARRAY
-        is_first_child = node == node.parent.first
+        is_first_child = node == node.parent.children.first
         same_line      = (.SAME_LINE in node.parent.flags)      // check for sameline on parent, not self (we do that later)
     }
     
@@ -136,60 +134,60 @@ serialize_dom_nodes_to_gon :: proc(using serializer: ^Serializer, node: ^DOM_Nod
     }
     
     #partial switch node.type {
-        case .OBJECT, .ARRAY: 
-            // ensure that end of object/array gets printed on same line if sameline flag is set on self
-            same_line ||= (.SAME_LINE in node.flags)
+      case .OBJECT, .ARRAY: 
+        // ensure that end of object/array gets printed on same line if sameline flag is set on self
+        same_line ||= (.SAME_LINE in node.flags)
+    
+        is_array := (node.type == .ARRAY)
+        if is_array {
+            elem_tid := node.children.first.data_binding.id
+            if do_sameline_for_type(elem_tid) {
+                node.flags |= { .SAME_LINE }
+                same_line = true
+            }
+        }
         
-            is_array := (node.type == .ARRAY)
-            if is_array {
-                elem_tid := node.first.data_binding.id
-                if do_sameline_for_type(elem_tid) {
-                    node.flags |= { .SAME_LINE }
-                    same_line = true
-                }
+        strings.write_string(&builder, is_array ? "[" : "{")
+        
+        // recurse for children
+        indent += 1
+        child := node.children.first
+        for child != nil {
+            if !serialize_dom_nodes_to_gon(serializer, child) {
+                return false
             }
-            
-            strings.write_string(&builder, is_array ? "[" : "{")
-            
-            // recurse for children
-            indent += 1
-            child := node.children.first
-            for child != nil {
-                if !serialize_dom_nodes_to_gon(serializer, child) {
-                    return false
-                }
-                child = child.next
+            child = child.next
+        }
+        indent -= 1
+        
+        if same_line {
+            strings.write_string(&builder, " ")
+        } else {
+            strings.write_string(&builder, "\n")
+            for i in 0..<indent do strings.write_string(&builder, INDENTATION_STRING)
+        }
+        
+        strings.write_string(&builder, is_array ? "]" : "}")
+        
+      case .FIELD:
+        if node.value.text == "" {
+            if node.data_binding.data == nil {
+                fmt.printf("ERROR: no value defined for node '%v'\n", node.name) // TODO: proc to get full path to node
+                return false
             }
-            indent -= 1
-            
-            if same_line {
-                strings.write_string(&builder, " ")
-            } else {
-                strings.write_string(&builder, "\n")
-                for i in 0..<indent do strings.write_string(&builder, INDENTATION_STRING)
-            }
-            
-            strings.write_string(&builder, is_array ? "]" : "}")
-            
-        case .FIELD:
-            if node.value.text == "" {
-                if node.data_binding.data == nil {
-                    fmt.printf("ERROR: no value defined for node '%v'\n", node.name) // TODO: proc to get full path to node
-                    return false
-                }
-                node.value.text = fmt.tprintf("%v", node.data_binding)
-            }
-            strings.write_string(&builder, 
-                to_conformant_string(node.value.text, allocator = context.temp_allocator),
-            )
-            
-        case .REF:
-            switch node.ref.type {
-                case .INDEX   : fmt.sbprintf(&builder, "%v", get_node_index(node.ref.node))
-                case .POINTER : fmt.sbprintf(&builder, "*\"%v\"", node.ref.text)
-                case .VALUE   : assert(false, "Cannot print a value node.") // should not occur
-            }
-            
+            node.value.text = fmt.tprintf("%v", node.data_binding)
+        }
+        strings.write_string(&builder, 
+            to_conformant_string(node.value.text, allocator = context.temp_allocator),
+        )
+        
+      case .REF:
+        switch node.ref.type {
+            case .INDEX   : fmt.sbprintf(&builder, "%v", get_node_index(node.ref.node))
+            case .POINTER : fmt.sbprintf(&builder, "*\"%v\"", node.ref.text)
+            case .VALUE   : assert(false, "Cannot print a value node.") // should not occur
+        }
+        
     }
     
     return true
@@ -200,7 +198,7 @@ serialize_dom_nodes_to_json :: proc(using serializer: ^Serializer, node: ^DOM_No
     
     in_array := node.parent != nil && node.parent.type == .ARRAY
     
-    is_first_child := node.parent != nil && node == node.parent.first
+    is_first_child := node.parent != nil && node == node.parent.children.first
     
     if !is_first_child {
         strings.write_string(&builder, ",")
@@ -216,38 +214,38 @@ serialize_dom_nodes_to_json :: proc(using serializer: ^Serializer, node: ^DOM_No
     }
     
     #partial switch node.type {
-        case .OBJECT, .ARRAY: 
-            is_array := node.type == .ARRAY
-            
-            strings.write_string(&builder, is_array ? "[" : "{")
-            
-            // recurse for children
-            indent += 1
-            child := node.children.first
-            for child != nil {
-                if !serialize_dom_nodes_to_json(serializer, child) {
-                    return false
-                }
-                child = child.next
+      case .OBJECT, .ARRAY: 
+        is_array := node.type == .ARRAY
+        
+        strings.write_string(&builder, is_array ? "[" : "{")
+        
+        // recurse for children
+        indent += 1
+        child := node.children.first
+        for child != nil {
+            if !serialize_dom_nodes_to_json(serializer, child) {
+                return false
             }
-            indent -= 1
-            
-            strings.write_string(&builder, "\n")
-            for i in 0..<indent do strings.write_string(&builder, INDENTATION_STRING)
-            
-            strings.write_string(&builder, is_array ? "]" : "}")
-            
-        case .FIELD:
-            if node.value.text == "" {
-                if node.data_binding.data == nil {
-                    fmt.printf("ERROR: no value defined for node '%v'\n", node.name) // TODO: proc to get full path to node
-                    return false
-                }
-                node.value.text = fmt.tprintf("%v", node.data_binding)
+            child = child.next
+        }
+        indent -= 1
+        
+        strings.write_string(&builder, "\n")
+        for i in 0..<indent do strings.write_string(&builder, INDENTATION_STRING)
+        
+        strings.write_string(&builder, is_array ? "]" : "}")
+        
+      case .FIELD:
+        if node.value.text == "" {
+            if node.data_binding.data == nil {
+                fmt.printf("ERROR: no value defined for node '%v'\n", node.name) // TODO: proc to get full path to node
+                return false
             }
-            strings.write_string(&builder, 
-                to_conformant_string(node.value.text, allocator = context.temp_allocator),
-            )
+            node.value.text = fmt.tprintf("%v", node.data_binding)
+        }
+        strings.write_string(&builder, 
+            to_conformant_string(node.value.text, allocator = context.temp_allocator),
+        )
     }
     
     return true
@@ -263,72 +261,72 @@ determine_node_type_for_serialization :: proc(node: ^DOM_Node) -> Field_Type {
     ti := runtime.type_info_base(type_info_of(node.data_binding.id))
     
     #partial switch tiv in ti.variant {
-        case runtime.Type_Info_Integer,
-             runtime.Type_Info_Float,
-             runtime.Type_Info_Enum,
-             runtime.Type_Info_String,
-             runtime.Type_Info_Boolean:
+      case runtime.Type_Info_Integer,
+           runtime.Type_Info_Float,
+           runtime.Type_Info_Enum,
+           runtime.Type_Info_String,
+           runtime.Type_Info_Boolean:
+        return .FIELD
+        
+      case runtime.Type_Info_Bit_Set: 
+        // check if parent data binding is the same.
+        if node.parent.data_binding.data == node.data_binding.data {
             return .FIELD
+        }
+        node.flags |= { .SAME_LINE }
+        return .ARRAY
         
-        case runtime.Type_Info_Bit_Set: 
-            // check if parent data binding is the same.
-            if node.parent.data_binding.data == node.data_binding.data {
-                return .FIELD
-            }
-            node.flags |= { .SAME_LINE }
-            return .ARRAY
-        
+      case runtime.Type_Info_Array:
         // arrays of bytes/u8 are serialized as string
         // we will probably distinguish this later on u8 vs byte, where byte is serialized using some binary data blob
-        case runtime.Type_Info_Array:
-            if tiv.elem.size == 1 {
-                return .FIELD
+        if tiv.elem.size == 1 {
+            return .FIELD
+        }
+        if io_data_found {
+            if .AS_OBJECT     in io_data.serialize.flags ||
+               .ARRAY_INDEXED in io_data.serialize.flags {
+                return .OBJECT
             }
-            if io_data_found {
-                if .AS_OBJECT     in io_data.serialize.flags ||
-                   .ARRAY_INDEXED in io_data.serialize.flags {
-                    return .OBJECT
-                }
-            }
-            return .ARRAY
-            
-        case runtime.Type_Info_Dynamic_Array:
-            if tiv.elem.size == 1 {
-                return .FIELD
-            }
-            if io_data_found {
-                if .AS_OBJECT     in io_data.serialize.flags ||
-                   .ARRAY_INDEXED in io_data.serialize.flags {
-                    return .OBJECT
-                }
-            }
-            return .ARRAY
-            
-        case runtime.Type_Info_Slice:
-            if tiv.elem.size == 1 {
-                return .FIELD
-            }
-            if io_data_found {
-                if .AS_OBJECT     in io_data.serialize.flags ||
-                   .ARRAY_INDEXED in io_data.serialize.flags {
-                    return .OBJECT
-                }
-            }
-            return .ARRAY
-            
-        case runtime.Type_Info_Struct:
-            if io_data_found {
-                if .AS_ARRAY in io_data.serialize.flags {
-                    return .ARRAY
-                }
-            }
-            return .OBJECT
+        }
+        return .ARRAY
         
-        case runtime.Type_Info_Map:
-            return .OBJECT
-            
-        case:
-            return .INVALID
+      case runtime.Type_Info_Dynamic_Array:
+        if tiv.elem.size == 1 {
+            return .FIELD
+        }
+        if io_data_found {
+            if .AS_OBJECT     in io_data.serialize.flags ||
+               .ARRAY_INDEXED in io_data.serialize.flags {
+                return .OBJECT
+            }
+        }
+        return .ARRAY
+        
+      case runtime.Type_Info_Slice:
+        if tiv.elem.size == 1 {
+            return .FIELD
+        }
+        if io_data_found {
+            if .AS_OBJECT     in io_data.serialize.flags ||
+               .ARRAY_INDEXED in io_data.serialize.flags {
+                return .OBJECT
+            }
+        }
+        return .ARRAY
+        
+      case runtime.Type_Info_Struct:
+        if io_data_found {
+            if .AS_ARRAY in io_data.serialize.flags {
+                return .ARRAY
+            }
+        }
+        return .OBJECT
+    
+      case runtime.Type_Info_Map:
+        return .OBJECT
+        
+      case:
+        return .INVALID
     }
     
     return .INVALID
@@ -340,90 +338,90 @@ append_nodes_for_indirect_bindings :: proc(node: ^DOM_Node, allocator := context
 
     ti := type_info_base(type_info_of(node.data_binding.id))
     #partial switch tiv in ti.variant {
-        case Type_Info_Struct: 
-            for i in 0..<tiv.field_count {
-                member_type   := tiv.types  [i]
-                member_name   := tiv.names  [i]
-                member_offset := tiv.offsets[i]
-                
-                member_any := any {
-                    data = mem.ptr_offset(cast(^byte)node.data_binding.data, member_offset),
-                    id   = member_type.id,
-                }
-                
-                // figure out whether to prepend elems (will do for things that need to be attrs)
-                append_data_node(node, member_name, member_any, allocator = allocator)
+      case Type_Info_Struct: 
+        for i in 0..<tiv.field_count {
+            member_type   := tiv.types  [i]
+            member_name   := tiv.names  [i]
+            member_offset := tiv.offsets[i]
+            
+            member_any := any {
+                data = mem.ptr_offset(cast(^byte)node.data_binding.data, member_offset),
+                id   = member_type.id,
             }
             
-            return
-            
-        case Type_Info_Array, Type_Info_Slice, Type_Info_Dynamic_Array: 
-            data       : rawptr
-            elem_count : int
-            elem_ti    : ^Type_Info
-            
-            // disambiguate array/slice/dynamic
-            #partial switch tiv in tiv {
-                case Type_Info_Array:
-                    data       = node.data_binding.data
-                    elem_count = tiv.count
-                    elem_ti    = tiv.elem
+            // figure out whether to prepend elems (will do for things that need to be attrs)
+            append_data_node(node, member_name, member_any, allocator = allocator)
+        }
         
-                case Type_Info_Slice:
-                    raw_slice := cast(^runtime.Raw_Slice) node.data_binding.data
-                    data       = raw_slice.data
-                    elem_count = raw_slice.len
-                    elem_ti    = tiv.elem
-      
-                case Type_Info_Dynamic_Array:
-                    raw_dynamic_array := cast(^runtime.Raw_Dynamic_Array) node.data_binding.data
-                    data       = raw_dynamic_array.data
-                    elem_count = raw_dynamic_array.len
-                    elem_ti    = tiv.elem
-                    if elem_count == 0 do return // skip serializing empty dynamic arrays
+        return
+        
+      case Type_Info_Array, Type_Info_Slice, Type_Info_Dynamic_Array: 
+        data       : rawptr
+        elem_count : int
+        elem_ti    : ^Type_Info
+        
+        // disambiguate array/slice/dynamic
+        #partial switch tiv in tiv {
+            case Type_Info_Array:
+                data       = node.data_binding.data
+                elem_count = tiv.count
+                elem_ti    = tiv.elem
+    
+            case Type_Info_Slice:
+                raw_slice := cast(^runtime.Raw_Slice) node.data_binding.data
+                data       = raw_slice.data
+                elem_count = raw_slice.len
+                elem_ti    = tiv.elem
+  
+            case Type_Info_Dynamic_Array:
+                raw_dynamic_array := cast(^runtime.Raw_Dynamic_Array) node.data_binding.data
+                data       = raw_dynamic_array.data
+                elem_count = raw_dynamic_array.len
+                elem_ti    = tiv.elem
+                if elem_count == 0 do return // skip serializing empty dynamic arrays
+        }
+        
+        for i in 0..<elem_count {
+            elem_any := any {
+                id   = elem_ti.id,
+                data = mem.ptr_offset(cast(^byte)data, elem_ti.size * i),
             }
             
-            for i in 0..<elem_count {
-                elem_any := any {
-                    id   = elem_ti.id,
-                    data = mem.ptr_offset(cast(^byte)data, elem_ti.size * i),
+            // TODO: as indexed, as object
+            
+            elem_name: string = fmt.tprint(i)
+            append_data_node(node, elem_name, elem_any, allocator = allocator)
+        }
+        
+        return
+        
+      case Type_Info_Map:
+        raw_map := transmute(^Raw_Map) node.data_binding.data
+        #partial switch ti_key in runtime.type_info_base(tiv.key).variant {
+          case Type_Info_String:
+            m := (^mem.Raw_Map)(node.data_binding.data)
+            
+            if m != nil {
+                if tiv.map_info == nil {
+                    return
                 }
-                
-                // TODO: as indexed, as object
-                
-                elem_name: string = fmt.tprint(i)
-                append_data_node(node, elem_name, elem_any, allocator = allocator)
+                map_cap := uintptr(runtime.map_cap(m^))
+                ks, vs, hs, _, _ := runtime.map_kvh_data_dynamic(m^, tiv.map_info)
+                j := 0
+                for bucket_index in 0..<map_cap {
+                    runtime.map_hash_is_valid(hs[bucket_index]) or_continue         
+                    key   := runtime.map_cell_index_dynamic(ks, tiv.map_info.ks, bucket_index)
+                    value := runtime.map_cell_index_dynamic(vs, tiv.map_info.vs, bucket_index)
+          
+                    append_data_node(node, (cast(^string)key)^, any { rawptr(value), tiv.value.id })
+                }
             }
             
-            return
-            
-        case Type_Info_Map:
-            raw_map := transmute(^Raw_Map) node.data_binding.data
-            #partial switch ti_key in runtime.type_info_base(tiv.key).variant {
-                case Type_Info_String:
-                    m := (^mem.Raw_Map)(node.data_binding.data)
-                    
-                    if m != nil {
-                        if tiv.map_info == nil {
-                            return
-                        }
-                        map_cap := uintptr(runtime.map_cap(m^))
-                        ks, vs, hs, _, _ := runtime.map_kvh_data_dynamic(m^, tiv.map_info)
-                        j := 0
-                        for bucket_index in 0..<map_cap {
-                            runtime.map_hash_is_valid(hs[bucket_index]) or_continue         
-                            key   := runtime.map_cell_index_dynamic(ks, tiv.map_info.ks, bucket_index)
-                            value := runtime.map_cell_index_dynamic(vs, tiv.map_info.vs, bucket_index)
-                  
-                            append_data_node(node, (cast(^string)key)^, any { rawptr(value), tiv.value.id })
-                        }
-                    }
-                    
-                case: 
-                    fmt.printf("Unable to serialize type: %v\nCurrently, only maps with string keys are supported.", ti)
-            }
-                    
-            return
+          case: 
+            fmt.printf("Unable to serialize type: %v\nCurrently, only maps with string keys are supported.", ti)
+        }
+                
+        return
     }
 }
 

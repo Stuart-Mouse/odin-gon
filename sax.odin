@@ -9,6 +9,7 @@ import "core:strconv"
 import "core:mem"
 import "core:unicode/utf8"
 import "core:math"
+import "core:log"
 
 import "core:encoding/json"
 
@@ -47,13 +48,12 @@ SAX_Tokenizer :: struct {
 }
 
 Parser :: struct {    
-    tokenizer     : SAX_Tokenizer,
+    tokenizer:      SAX_Tokenizer,
     
-    data_bindings : [dynamic] Data_Binding,
-    event_handler : SAX_Event_Handler,
-    log           : Log_Proc,
+    data_bindings:  [dynamic] Data_Binding,
+    event_handler:  SAX_Event_Handler,
 
-    _field_depth  : int,
+    _field_depth:   int,
 }
 
 Parser_Init_Flags :: bit_set [Parser_Init_Flag]
@@ -69,6 +69,19 @@ init_parse_context :: proc(ctxt: ^Parser, flags: Parser_Init_Flags) {
         append_elems(&ctxt.event_handler.object_begin         , ..standard_event_handler.object_begin[:])
         append_elems(&ctxt.event_handler.object_end           , ..standard_event_handler.object_end[:])
     }
+}
+
+deinit_parse_context :: proc(ctxt: ^Parser) {
+    delete(ctxt.data_bindings)
+    free_event_handler(&ctxt.event_handler)
+}
+
+free_event_handler :: proc(eh: ^SAX_Event_Handler) {
+    delete(eh.field_read)
+    delete(eh.data_binding)
+    delete(eh.indirect_data_binding)
+    delete(eh.object_begin)
+    delete(eh.object_end)
 }
 
 set_file_to_parse :: proc(ctxt: ^Parser, file: string, file_format: File_Format = .GON) {
@@ -92,19 +105,19 @@ add_event_handler :: proc(event_handler: ^SAX_Event_Handler, event_type: SAX_Eve
     dst: ^[dynamic]SAX_Event_Handler_Proc
 
     switch event_type {
-        case .OBJECT_BEGIN:
-            dst = &event_handler.object_begin
-        case .OBJECT_END:
-            dst = &event_handler.object_end
-        case .FIELD_READ:
-            dst = &event_handler.field_read
-        case .DATA_BINDING:
-            dst = &event_handler.data_binding
-        case .INDIRECT_DATA_BINDING:
-            dst = &event_handler.indirect_data_binding
-        case: 
-            fmt.println("Error: Tried to add an event handler for an invalid event type!")
-            assert(false)
+      case .OBJECT_BEGIN:
+        dst = &event_handler.object_begin
+      case .OBJECT_END:
+        dst = &event_handler.object_end
+      case .FIELD_READ:
+        dst = &event_handler.field_read
+      case .DATA_BINDING:
+        dst = &event_handler.data_binding
+      case .INDIRECT_DATA_BINDING:
+        dst = &event_handler.indirect_data_binding
+      case: 
+        fmt.println("Error: Tried to add an event handler for an invalid event type!")
+        assert(false)
     }
 
     append(dst, handler_proc)
@@ -173,14 +186,6 @@ SAX_parse_file :: proc(using ctxt: ^Parser) -> bool {
         parent = nil,
     }
 
-    // ensure that parse context is properly init'd
-    if log == nil {
-        log = default_log_proc
-        if log == nil {
-            log = log_stub
-        }
-    }
-    
     // TODO: we should probably verify that the path strings actually conform to the standard for gon strings
 
     // split the paths for all data bindings before parsing
@@ -192,7 +197,7 @@ SAX_parse_file :: proc(using ctxt: ^Parser) -> bool {
             if root.data_binding == nil {
                 root.data_binding = b.binding
             } else {
-                log("Unable to bind multiple values to the root object!")
+                log.logf(.Error, "Unable to bind multiple values to the root object!")
                 return false
             }
         } else {
@@ -228,12 +233,12 @@ SAX_parse_object :: proc(using ctxt: ^Parser, parent: ^SAX_Field) -> (success: b
                     field.name = next_token
                 case .OBJECT_END:
                     if parent.type != .OBJECT {
-                        log("GON parse error: Unexpected %v token \"%v\".", next_token_type, next_token)
+                        log.logf(.Error, "GON parse error: Unexpected %v token \"%v\".", next_token_type, next_token)
                         return false
                     }
                     return true
                 case:
-                    log("GON parse error: Unexpected %v token \"%v\".", next_token_type, next_token)
+                    log.logf(.Error, "GON parse error: Unexpected %v token \"%v\".", next_token_type, next_token)
                     return false
             }
         } else {
@@ -252,12 +257,12 @@ SAX_parse_object :: proc(using ctxt: ^Parser, parent: ^SAX_Field) -> (success: b
                 field.type = .ARRAY
             case .ARRAY_END:
                 if parent.type != .ARRAY {
-                    log("GON parse error: Unexpected %v token \"%v\".", next_token_type, next_token)
+                    log.logf(.Error, "GON parse error: Unexpected %v token \"%v\".", next_token_type, next_token)
                     return false
                 }
                 return true
             case:
-                log("GON parse error: Unexpected %v token \"%v\".", next_token_type, next_token)
+                log.logf(.Error, "GON parse error: Unexpected %v token \"%v\".", next_token_type, next_token)
                 return false
         }
         
@@ -412,37 +417,37 @@ process_data_binding :: proc(using ctxt: ^Parser, field: ^SAX_Field) -> bool {
                         strings.write_string(&sb, "Error on field '")
                         format_field_address(&sb, field)
                         strings.write_string(&sb, "': Bit sets must be expressed as GON arrays, not as single-valued fields.")
-                        log(strings.to_string(sb))
+                        log.logf(.Error, strings.to_string(sb))
                         return false
                     }
                 
                 // arrays of bytes/u8 are permitted as single-valued fields so that we can parse them as strings
                 case runtime.Type_Info_Array:
                     if tiv.elem.size != 1 {
-                        log("Unable to bind field \"%v\" to data of type: %v", field.name, field.data_binding.id)
+                        log.logf(.Error, "Unable to bind field \"%v\" to data of type: %v", field.name, field.data_binding.id)
                         print_field_address(field)
                         return false
                     }
                 case runtime.Type_Info_Dynamic_Array:
                     if tiv.elem.size != 1 {
-                        log("Unable to bind field \"%v\" to data of type: %v", field.name, field.data_binding.id)
+                        log.logf(.Error, "Unable to bind field \"%v\" to data of type: %v", field.name, field.data_binding.id)
                         print_field_address(field)
                         return false
                     }
                 case runtime.Type_Info_Slice:
                     if tiv.elem.size != 1 {
-                        log("Unable to bind field \"%v\" to data of type: %v", field.name, field.data_binding.id)
+                        log.logf(.Error, "Unable to bind field \"%v\" to data of type: %v", field.name, field.data_binding.id)
                         print_field_address(field)
                         return false
                     }
                     
                 case:
-                    log("Unable to bind field \"%v\" to data of type: %v", field.name, field.data_binding.id)
+                    log.logf(.Error, "Unable to bind field \"%v\" to data of type: %v", field.name, field.data_binding.id)
                     print_field_address(field)
                     return false
             }
             if !set_value_from_string(field.data_binding, field.value) {
-                log("Failed to set value of data binding on field '%v'", field.name)
+                log.logf(.Error, "Failed to set value of data binding on field '%v'", field.name)
                 return false
             }
             
@@ -460,7 +465,7 @@ process_data_binding :: proc(using ctxt: ^Parser, field: ^SAX_Field) -> bool {
                         strings.write_string(&sb, "Error on field '")
                         format_field_address(&sb, field)
                         strings.write_string(&sb, "': Bit sets cannot contain nested GON arrays, only bit values.")
-                        log(strings.to_string(sb))
+                        log.logf(.Error, strings.to_string(sb))
                         return false
                     }
                 
@@ -470,7 +475,7 @@ process_data_binding :: proc(using ctxt: ^Parser, field: ^SAX_Field) -> bool {
                     }
                 
                 case:
-                    log("Unable to bind internal type '%v' to GON array.", field.data_binding.id)
+                    log.logf(.Error, "Unable to bind internal type '%v' to GON array.", field.data_binding.id)
                     return false
             }
             
@@ -511,13 +516,13 @@ process_data_binding :: proc(using ctxt: ^Parser, field: ^SAX_Field) -> bool {
                     }
                 
                 case:
-                    log("Unable to bind internal type '%v' to GON object.", field.data_binding.id)
+                    log.logf(.Error, "Unable to bind internal type '%v' to GON object.", field.data_binding.id)
                     return false
             }
             
         case .INVALID: fallthrough
         case:
-            log("Invalid field passed to process_data_binding.")
+            log.logf(.Error, "Invalid field passed to process_data_binding.")
             return false
     }
     return true // ?
@@ -593,7 +598,7 @@ check_for_indirect_data_binding :: proc(using ctxt: ^Parser, field, parent: ^SAX
             }
             
             if field.index >= parent_tiv.count {
-                log("Unable to add to array, ran out of space.")
+                log.logf(.Error, "Unable to add to array, ran out of space.")
                 return false
             } else {
                 elem_ti := runtime.type_info_base(parent_tiv.elem)
@@ -612,7 +617,7 @@ check_for_indirect_data_binding :: proc(using ctxt: ^Parser, field, parent: ^SAX
             }
             
             if field.index >= raw_slice.len {
-                log("Unable to add to slice, ran out of space.")
+                log.logf(.Error, "Unable to add to slice, ran out of space.")
                 return false
             } else {
                 elem_ti := runtime.type_info_base(parent_tiv.elem)

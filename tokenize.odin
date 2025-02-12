@@ -70,21 +70,18 @@ peek_token :: proc(using t: ^Tokenizer) -> Token {
 
 // mutates the passed string, advancing it to the position after the returned token
 lex_next_token :: proc(using t: ^Tokenizer) -> (Token, bool) {
-    if len(file) <= 0 do return { .EOF, "", line  }, true
+    if len(file) <= 0 do return { .EOF, "", line }, true
     
     // skip whitespace and comments
     for {
         for is_whitespace(file[0]) {
-            if file[0] == '\n' {
-                line += 1
-            }
-            if !advance(&file) {
+            if !advance_tokenizer(t) {
                 return { .EOF, "", line }, true
             }
         }
         if file[0] == '#' {
             for file[0] != '\n' {
-                if !advance(&file) {
+                if !advance_tokenizer(t) {
                     return { .EOF, "", line }, true
                 }
             }
@@ -96,38 +93,38 @@ lex_next_token :: proc(using t: ^Tokenizer) -> (Token, bool) {
     // single character tokens
     switch file[0] {
         case '{':
-            advance(&file)
+            advance_tokenizer(t)
             return { .OBJECT_BEGIN, "", line }, true
         case '}':
-            advance(&file)
+            advance_tokenizer(t)
             return { .OBJECT_END,   "", line }, true
         case '[':
-            advance(&file)
+            advance_tokenizer(t)
             return { .ARRAY_BEGIN,  "", line }, true
         case ']':
-            advance(&file)
+            advance_tokenizer(t)
             return { .ARRAY_END,    "", line }, true
         case '&':
-            advance(&file)
+            advance_tokenizer(t)
             return { .REF_INDEX,    "", line }, true
         case '*':
-            advance(&file)
+            advance_tokenizer(t)
             return { .REF_POINTER,  "", line }, true
         case '$':
-            advance(&file)
+            advance_tokenizer(t)
             return { .REF_VALUE,    "", line }, true
     }
     
     if parsing_path {
         // tokens only used in path strings, maybe we have a param to skip these when not parsing for a path
         if file[0] == '/' {
-            advance(&file)
+            advance_tokenizer(t)
             return { .PATH_SPLIT, "", line }, true
         }
         
         // '..' token used in path strings to step up to parent scope
         if len(file) >= 2 && file[0] == '.' && file[1] == '.' {
-            advance(&file, 2)
+            advance_tokenizer(t, 2)
             return { .PATH_PARENT, "", line }, true
         }
     }
@@ -136,7 +133,7 @@ lex_next_token :: proc(using t: ^Tokenizer) -> (Token, bool) {
     if file[0] == '"' || file[0] == '\'' || file[0] == '`' { 
         quote_char := file[0]
         
-        if !advance(&file) do return { .EOF, "", line }, false
+        if !advance_tokenizer(t) do return { .EOF, "", line }, false
         string_value := file[0:]
         string_len := 0
         
@@ -144,9 +141,9 @@ lex_next_token :: proc(using t: ^Tokenizer) -> (Token, bool) {
             if file[0] == '\n' do line += 1
             adv := 1 + int(file[0] == '\\') // TODO: handle escape sequences properly, this will eat a newline also
             string_len += adv
-            if !advance(&file, adv) do return { .EOF, "", line }, false
+            if !advance_tokenizer(t, adv) do return { .EOF, "", line }, false
         }
-        advance(&file)
+        advance_tokenizer(t)
         
         return { .STRING, string_value[:string_len], line }, true
     }
@@ -158,7 +155,7 @@ lex_next_token :: proc(using t: ^Tokenizer) -> (Token, bool) {
         
         for is_char_permitted_in_unquoted_string(file[0], parsing_path) {
             string_len += 1
-            if !advance(&file) do break
+            if !advance_tokenizer(t) do break
         }
         
         return { .STRING, string_value[:string_len], line }, true
@@ -189,10 +186,15 @@ is_char_permitted_in_unquoted_string :: proc(char: u8, parsing_path := false) ->
 }
 
 // bascially wraps our slice operation so that we can handle an error in the case that we run out of characters
-advance :: proc(file: ^string, amount := 1) -> bool {
-    amount := min(amount, len(file))
-    file^ = file^[amount:]
-    return len(file) != 0
+advance_tokenizer :: proc(t: ^Tokenizer, amount := 1) -> bool {
+    amount := min(amount, len(t.file));
+    for i in 0..<amount {
+        if t.file[i] == '\n' {
+            t.line += 1;
+        }
+    }
+    t.file = t.file[amount:];
+    return len(t.file) > 0; // return false when we hit EOF
 }
 
 is_whitespace :: proc(char: u8) -> bool {
@@ -205,8 +207,8 @@ skip_whitespace_and_comments :: proc(file: ^string) -> bool {
         for is_whitespace(file^[0]) {
             advance(file) or_return
         }
-        if file^[0] == '#' {
-            for file^[0] != '\n' {
+        if file[0] == '#' {
+            for file[0] != '\n' {
                 advance(file) or_return
             }
             continue
