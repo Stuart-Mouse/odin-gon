@@ -1,3 +1,5 @@
+#+feature using-stmt
+
 package gon
 
 import "base:runtime"
@@ -26,13 +28,14 @@ set_value_from_string :: proc(value: any, text: string, no_copy := false, loc :=
 
     #partial switch &tiv in ti.variant {
         case Type_Info_Integer:
-            if !dynamic_int_cast(value, strconv.atoi(text)) {
+            if !dynamic_int_cast(value, strconv.parse_int(text)) {
                 return false
             }
             return true
 
         case Type_Info_Float:
-            if !dynamic_float_cast(value, strconv.atof(text)) {
+            float_value, _ := strconv.parse_f64(text)
+            if !dynamic_float_cast(value, float_value) {
                 return false
             }
             return true
@@ -49,7 +52,7 @@ set_value_from_string :: proc(value: any, text: string, no_copy := false, loc :=
                     return true
                 }
             }
-            if dynamic_int_cast(value, strconv.atoi(text)) {
+            if dynamic_int_cast(value, strconv.parse_int(text)) {
                 return true
             }
             return false
@@ -62,7 +65,9 @@ set_value_from_string :: proc(value: any, text: string, no_copy := false, loc :=
             elem_ti := type_info_base(tiv.elem)
             #partial switch elem_tiv in elem_ti.variant {
               case Type_Info_Integer:
-                bit := cast(i64) strconv.atoi(text)
+                bit_int, ok := strconv.parse_int(text)
+                bit := cast(i64) bit_int
+                
                 if bit >= tiv.lower && bit <= tiv.upper {
                     bit -= tiv.lower
                     bytes[bit / 8] |= u8(1 << u64(bit % 8))

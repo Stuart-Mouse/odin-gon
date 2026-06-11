@@ -1,3 +1,5 @@
+#+feature using-stmt
+
 package gon
 
 import "base:runtime"
@@ -89,7 +91,7 @@ serialize_to_string :: proc(using serializer: ^Serializer) -> (str: string, ok: 
 
 serialize_to_file :: proc(using serializer: ^Serializer, file_path: string) -> bool {
     serialize(serializer) or_return
-    os.write_entire_file(file_path, serializer.builder.buf[:])
+    _ = os.write_entire_file(file_path, serializer.builder.buf[:])
     return true
 }
 

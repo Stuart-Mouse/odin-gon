@@ -1,4 +1,4 @@
-
+#+feature using-stmt
 package gon
 
 import "base:runtime"
